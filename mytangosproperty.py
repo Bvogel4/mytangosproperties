@@ -1221,7 +1221,7 @@ class Shape_Profile(PynbodyPropertyCalculation):
                                                               nbins=bins,
                                                               ndim=3, rmin=rin,
                                                               rmax=rout,
-                                                              max_iterations=125,
+                                                              max_iterations=175,
                                                               tol=5e-3,
                                                               justify=False)
         ba = axis_lengths[:, 1] / axis_lengths[:, 0]
@@ -1278,6 +1278,16 @@ class Shape_Profile(PynbodyPropertyCalculation):
 
     def plot_ylog(self):
         return False
+
+    def plot_xlabel(self):
+        return r'$r_{bins}$ (kpc)'
+    def plot_ylabel(self):
+        return r'$b/a or c/a$'
+
+    def plot_xvalues(self,for_data):
+        # need someway to find out if this is the stellar or dark matter profile and return the correct rbins
+        return
+        
 
 class SmoothAxisRatio(LivePropertyCalculation):
     names = ['ba_s_smoothed', 'ca_s_smoothed', 'ba_d_smoothed', 'ca_d_smoothed']
@@ -1376,15 +1386,16 @@ class DynamicalMass(PynbodyPropertyCalculation):
     Calculate the dynamical mass of a halo using the circular velocity profile at the half-light radius.
     :returns: Mdyn in Msol
     """
-    names = ['Mdyn']
+    names = 'Mdyn'
 
     def requires_property(self):
-        ['Rhalf']
+        return ['Rhalf']
 
     def calculate(self, halo, existing_properties):
         halo.physical_units()
         pynbody.analysis.angmom.faceon(halo)
         Rhalf = existing_properties['Rhalf']
+        #Rhalf = pynbody.analysis.luminosity.half_light_r(halo)
 
         prof = pynbody.analysis.profile.Profile(halo,type='lin',min=.25,max=5*Rhalf,ndim=2,nbins=int((5*Rhalf)/0.1))
         indeff = np.argmin(np.abs(prof['rbins']-Rhalf))
