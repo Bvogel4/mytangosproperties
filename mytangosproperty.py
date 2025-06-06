@@ -712,6 +712,8 @@ class IsophoteAnalysis(LivePropertyCalculation):
                         fix_center=False,
                         fix_eps=False,
                         fix_pa=False,
+                        sclip=2.,
+                        nclip=3
                     )
 
                     # Store this fitting result for visualization
@@ -1088,9 +1090,9 @@ class IsophoteAnalysis(LivePropertyCalculation):
         Returns:
             List of isophote parameters for each orientation
         """
-        images = existing_properties['halo_images']
-        reff_values = existing_properties['image_reffs']
-        orientations = existing_properties['image_orientations']
+        images = existing_properties['halo_images'][0:2]
+        reff_values = existing_properties['image_reffs'][0:2]
+        orientations = existing_properties['image_orientations'][0:2]
         Rhalf = existing_properties['Rhalf']
 
         # Step size factors ordered from largest to smallest
@@ -1101,8 +1103,8 @@ class IsophoteAnalysis(LivePropertyCalculation):
         #logger.info(f"kpc_per_pixel scale: {kpc_per_pixel:.4f}")
 
         # Check if we should use parallel processing
-        use_parallel = len(images) > 1
         n_cores = min(40, len(images))  # Use at most 40 cores or number of images
+        n_cores = 1
 
 
         params = pymp.shared.dict()
