@@ -302,17 +302,173 @@ def get_bins(n):
         return int( (np.log10(n) - 3) ** 2 * 20)
 
 
-class ImageHalo(PynbodyPropertyCalculation):
-    """Generates V-band luminosity density images at different orientations and calculates
-    effective radii for each projection to study galaxy morphology"""
+# class ImageHalo(PynbodyPropertyCalculation):
+#     """Generates V-band luminosity density images at different orientations and calculates
+#     effective radii for each projection to study galaxy morphology"""
+#
+#     # Store the key properties we need for shape analysis
+#     names = ['halo_images', 'image_reffs', 'image_orientations', 'Rhalf',
+#              'profile_sb_v', 'profile_v_lum_den', 'profile_rbins',
+#              'profile_lum_den', 'profile_mags_v', 'profile_binarea']
+#
+#     @staticmethod
+#     def fit_sersic_profile(prof):
+#         """Fits a Sérsic profile to determine the effective radius (Reff) for each projection.
+#
+#         The Sérsic profile describes how galaxy brightness varies with radius:
+#         μ(r) = μeff + 2.5(0.868n - 0.142)((r/reff)^(1/n) - 1)
+#         where μeff is surface brightness at effective radius, n is Sérsic index
+#         """
+#
+#         def sersic(r, mueff, reff, n):
+#             return mueff + 2.5 * (0.868 * n - 0.142) * (
+#                     (r / reff) ** (1. / n) - 1)
+#
+#         # Smooth the V-band surface brightness profile to reduce noise
+#         vband = prof['sb,V']
+#         smooth = np.nanmean(
+#             np.pad(vband.astype(float), (0, 3 - vband.size % 3),
+#                    mode='constant', constant_values=np.nan).reshape(-1, 3),
+#             axis=1)
+#
+#         # Set up radial coordinates for fitting
+#         x = np.arange(
+#             len(smooth)) * 0.3 + 0.15  # Convert to physical units (kpc)
+#         x[0] = .05  # Avoid r=0 singularity
+#
+#         # Remove any NaN values before fitting
+#         y = smooth[~np.isnan(smooth)]
+#         x = x[~np.isnan(smooth)]
+#
+#         # Initial guesses for fit parameters
+#         r0 = x[int(len(x) / 2)]  # Initial Reff guess is middle of radial range
+#         m0 = np.mean(
+#             y[:3])  # Initial surface brightness guess from central region
+#
+#         # Fit Sérsic profile with reasonable bounds for galaxy parameters
+#         par, _ = curve_fit(sersic, x, y, p0=(m0, r0, 1),
+#                            bounds=([10, 0, 0.5], [40, 100, 16.5]))
+#         return par[1]  # Return fitted Reff
+#
+#     @staticmethod
+#     def generate_image(stars, width):
+#         f = plt.figure(frameon=False)
+#         f.set_size_inches(10, 10)
+#         ax = plt.Axes(f, [0., 0., 1., 1.])
+#         ax.set_axis_off()
+#         f.add_axes(ax)
+#         im = pynbody.plot.sph.image(stars, qty='V_lum_den', width=width, subplot=ax, units='kpc^-2', resolution=1000,
+#                                     show_cbar=False, ret_im=True)
+#         data = im.get_array()  # Get the numpy array
+#         plt.close(f)
+#         return data
+#
+#
+#     def process_orientation(self,halo, width, Rhalf):
+#         orientation_data = {'Rhalf': Rhalf.view(np.ndarray)}
+#         prof = pynbody.analysis.profile.Profile(halo.s, type='lin', min=.25, max=5 * Rhalf, ndim=2,
+#                                                 nbins=int((5 * Rhalf) / 0.1))
+#
+#         orientation_data.update({
+#             'sb,v': prof['sb,V'].copy().view(np.ndarray),
+#             'v_lum_den': prof['V_lum_den'].copy().view(np.ndarray),
+#             'rbins': prof['rbins'].copy().view(np.ndarray),
+#             'lum_den': (10.0 ** (-0.4 * prof['magnitudes,V']) / prof._binsize.in_units('pc^2')).copy().view(np.ndarray),
+#             'mags,v': prof['magnitudes,V'].copy().view(np.ndarray),
+#             'binarea': prof._binsize.in_units('pc^2').copy().view(np.ndarray)
+#         })
+#         orientation_data['Reff'] = self.fit_sersic_profile(prof)
+#
+#         orientation_data['image'] = self.generate_image(halo.s, width)
+#
+#
+#         return orientation_data
+#
+#     def process_halo(self, halo, existing_properties):
+#         """Generate images and measure Reff across different viewing angles.
+#
+#         We sample viewing angles by rotating the galaxy through θ and φ to create
+#         a set of 2D projections that mimic observational studies.
+#         """
+#         dx, dy = 30, 30  # Rotation increments (default: 30,30 for finer sampling)
+#         halo.physical_units()  # Ensure physical units are used
+#
+#         # Orient galaxy face-on initially using gas angular momentum
+#         pynbody.analysis.angmom.faceon(halo)
+#         # make sure halo has stars
+#         Rhalf = pynbody.analysis.luminosity.half_light_r(halo)
+#         width = 9 * Rhalf  # Image width captures extended structure
+#
+#         # Select stars within a sphere that contains full projection at any angle
+#         ImageSpace = pynbody.filt.Sphere(width * np.sqrt(2) * 1.01)
+#
+#         xrotations = np.arange(0, 180, dx)
+#         yrotations = np.arange(0, 360, dy)
+#
+#         # Create a list of all orientation combinations
+#         all_orientations = [(x, y) for x in xrotations for y in yrotations]
+#
+#         # Shared dictionary to store results
+#         shared_dict = pymp.shared.dict()
+#
+#         # Process all orientations in parallel
+#         with pymp.Parallel(1) as p:  # Adjust number of processes as needed
+#             for i in p.range(len(all_orientations)):
+#                 xrotation, yrotation = all_orientations[i]
+#                 # Apply rotations
+#                 with halo.rotate_x(xrotation).rotate_y(yrotation):
+#                     key = f'x{xrotation:03d}y{yrotation:03d}'
+#                     sb_dict = self.process_orientation(halo.s[ImageSpace], width, Rhalf)
+#
+#                 # Store result with lock to avoid conflicts
+#                 with p.lock:
+#                     shared_dict[key] = sb_dict
+#
+#         shared_dict = dict(shared_dict)
+#         # sort the dictionary by key
+#         shared_dict = dict(sorted(shared_dict.items()))
+#
+#         # Unpack results from shared dictionary
+#         orientations = list(shared_dict.keys())
+#         #initialize lists
+#         images = []
+#         reff_values = []
+#         profile_sb_v = []
+#         profile_v_lum_den = []
+#         profile_rbins = []
+#         profile_lum_den = []
+#         profile_mags_v = []
+#         profile_binarea = []
+#         for key in orientations:
+#             images.append(shared_dict[key]['image'])
+#             reff_values.append(shared_dict[key]['Reff'])
+#             profile_sb_v.append(shared_dict[key]['sb,v'])
+#             profile_v_lum_den.append(shared_dict[key]['v_lum_den'])
+#             profile_rbins.append(shared_dict[key]['rbins'])
+#             profile_lum_den.append(shared_dict[key]['lum_den'])
+#             profile_mags_v.append(shared_dict[key]['mags,v'])
+#             profile_binarea.append(shared_dict[key]['binarea'])
+#
+#
+#         return images, reff_values, orientations, Rhalf, profile_sb_v, profile_v_lum_den, profile_rbins, profile_lum_den, profile_mags_v, profile_binarea
+#     def calculate(self,halo,existing_properties):
+#         return self.process_halo(halo, existing_properties)
 
-    # Store the key properties we need for shape analysis
-    names = ['halo_images', 'image_reffs', 'image_orientations', 'Rhalf',
-             'profile_sb_v', 'profile_v_lum_den', 'profile_rbins',
-             'profile_lum_den', 'profile_mags_v', 'profile_binarea']
+
+class ImageHalo(PynbodyPropertyCalculation):
+    """Base class for generating luminosity/density images at different orientations
+    and calculating effective radii for each projection to study galaxy morphology"""
+
+    # These should be overridden in subclasses
+    imaging_qty = None  # e.g., 'V_lum_den', 'U_lum_den', 'rho'
+    imaging_units = None  # e.g., 'kpc^-2', 'Msol kpc^-3'
+    particle_type_attr = None  # e.g., 's', 'dm', 'g'
+    sb_profile_key = None  # e.g., 'sb,V', 'sb,U', None for mass density
+    lum_den_key = None  # e.g., 'V_lum_den', 'U_lum_den', None for mass density
+    magnitude_key = None  # e.g., 'magnitudes,V', 'magnitudes,U', None for mass density
 
     @staticmethod
-    def fit_sersic_profile(prof):
+    def fit_sersic_profile(prof, sb_key):
         """Fits a Sérsic profile to determine the effective radius (Reff) for each projection.
 
         The Sérsic profile describes how galaxy brightness varies with radius:
@@ -324,16 +480,20 @@ class ImageHalo(PynbodyPropertyCalculation):
             return mueff + 2.5 * (0.868 * n - 0.142) * (
                     (r / reff) ** (1. / n) - 1)
 
-        # Smooth the V-band surface brightness profile to reduce noise
-        vband = prof['sb,V']
+        # Smooth the surface brightness profile to reduce noise
+        if sb_key is None:
+            # For mass density, we might need to calculate surface brightness differently
+            # or use a different approach - this would need to be implemented based on your needs
+            raise NotImplementedError("Sérsic fitting for mass density not yet implemented")
+
+        profile_data = prof[sb_key]
         smooth = np.nanmean(
-            np.pad(vband.astype(float), (0, 3 - vband.size % 3),
+            np.pad(profile_data.astype(float), (0, 3 - profile_data.size % 3),
                    mode='constant', constant_values=np.nan).reshape(-1, 3),
             axis=1)
 
         # Set up radial coordinates for fitting
-        x = np.arange(
-            len(smooth)) * 0.3 + 0.15  # Convert to physical units (kpc)
+        x = np.arange(len(smooth)) * 0.3 + 0.15  # Convert to physical units (kpc)
         x[0] = .05  # Avoid r=0 singularity
 
         # Remove any NaN values before fitting
@@ -342,64 +502,89 @@ class ImageHalo(PynbodyPropertyCalculation):
 
         # Initial guesses for fit parameters
         r0 = x[int(len(x) / 2)]  # Initial Reff guess is middle of radial range
-        m0 = np.mean(
-            y[:3])  # Initial surface brightness guess from central region
+        m0 = np.mean(y[:3])  # Initial surface brightness guess from central region
 
         # Fit Sérsic profile with reasonable bounds for galaxy parameters
         par, _ = curve_fit(sersic, x, y, p0=(m0, r0, 1),
                            bounds=([10, 0, 0.5], [40, 100, 16.5]))
         return par[1]  # Return fitted Reff
 
-    @staticmethod
-    def generate_image(stars, width):
+    def generate_image(self, particles, width):
+        """Generate image for the specified imaging quantity and units"""
         f = plt.figure(frameon=False)
         f.set_size_inches(10, 10)
         ax = plt.Axes(f, [0., 0., 1., 1.])
         ax.set_axis_off()
         f.add_axes(ax)
-        im = pynbody.plot.sph.image(stars, qty='V_lum_den', width=width, subplot=ax, units='kpc^-2', resolution=1000,
+        im = pynbody.plot.sph.image(particles, qty=self.imaging_qty, width=width,
+                                    subplot=ax, units=self.imaging_units, resolution=1000,
                                     show_cbar=False, ret_im=True)
         data = im.get_array()  # Get the numpy array
         plt.close(f)
         return data
 
-
-    def process_orientation(self,halo, width, Rhalf):
+    def process_orientation(self, particles, width, Rhalf):
+        """Process a single orientation and extract relevant profile data"""
         orientation_data = {'Rhalf': Rhalf.view(np.ndarray)}
-        prof = pynbody.analysis.profile.Profile(halo.s, type='lin', min=.25, max=5 * Rhalf, ndim=2,
+        prof = pynbody.analysis.profile.Profile(particles, type='lin', min=.25, max=5 * Rhalf, ndim=2,
                                                 nbins=int((5 * Rhalf) / 0.1))
 
+        # Always store the shared properties
         orientation_data.update({
-            'sb,v': prof['sb,V'].copy().view(np.ndarray),
-            'v_lum_den': prof['V_lum_den'].copy().view(np.ndarray),
             'rbins': prof['rbins'].copy().view(np.ndarray),
-            'lum_den': (10.0 ** (-0.4 * prof['magnitudes,V']) / prof._binsize.in_units('pc^2')).copy().view(np.ndarray),
-            'mags,v': prof['magnitudes,V'].copy().view(np.ndarray),
             'binarea': prof._binsize.in_units('pc^2').copy().view(np.ndarray)
         })
-        orientation_data['Reff'] = self.fit_sersic_profile(prof)
 
-        orientation_data['image'] = self.generate_image(halo.s, width)
+        # Store imaging-specific properties
+        if self.sb_profile_key:
+            orientation_data[f'sb_{self.imaging_qty.split("_")[0]}'] = prof[self.sb_profile_key].copy().view(np.ndarray)
 
+        if self.lum_den_key:
+            orientation_data[f'{self.imaging_qty}'] = prof[self.lum_den_key].copy().view(np.ndarray)
+
+        if self.magnitude_key:
+            orientation_data[f'mags_{self.imaging_qty.split("_")[0]}'] = prof[self.magnitude_key].copy().view(
+                np.ndarray)
+            orientation_data['lum_den'] = (
+                        10.0 ** (-0.4 * prof[self.magnitude_key]) / prof._binsize.in_units('pc^2')).copy().view(
+                np.ndarray)
+
+        # For mass density, handle differently
+        if self.imaging_qty == 'rho':
+            orientation_data['rho'] = prof['density'].copy().view(np.ndarray)
+
+        # Fit Sérsic profile if applicable
+        if self.sb_profile_key:
+            orientation_data['Reff'] = self.fit_sersic_profile(prof, self.sb_profile_key)
+        else:
+            # For mass density, you might want to define a different effective radius measure
+            orientation_data['Reff'] = np.nan  # or implement alternative method
+
+        orientation_data['image'] = self.generate_image(particles, width)
 
         return orientation_data
 
     def process_halo(self, halo, existing_properties):
-        """Generate images and measure Reff across different viewing angles.
-
-        We sample viewing angles by rotating the galaxy through θ and φ to create
-        a set of 2D projections that mimic observational studies.
-        """
+        """Generate images and measure Reff across different viewing angles."""
         dx, dy = 30, 30  # Rotation increments (default: 30,30 for finer sampling)
         halo.physical_units()  # Ensure physical units are used
 
         # Orient galaxy face-on initially using gas angular momentum
         pynbody.analysis.angmom.faceon(halo)
-        # make sure halo has stars
-        Rhalf = pynbody.analysis.luminosity.half_light_r(halo)
+
+        # Get the appropriate particle type
+        particles = getattr(halo, self.particle_type_attr)
+
+        # Calculate half-light radius (or equivalent for mass density)
+        if self.imaging_qty == 'rho':
+            # For mass density, use half-mass radius or similar
+            Rhalf = pynbody.analysis.luminosity.half_mass_r(particles)
+        else:
+            Rhalf = pynbody.analysis.luminosity.half_light_r(halo)
+
         width = 9 * Rhalf  # Image width captures extended structure
 
-        # Select stars within a sphere that contains full projection at any angle
+        # Select particles within a sphere that contains full projection at any angle
         ImageSpace = pynbody.filt.Sphere(width * np.sqrt(2) * 1.01)
 
         xrotations = np.arange(0, 180, dx)
@@ -418,7 +603,7 @@ class ImageHalo(PynbodyPropertyCalculation):
                 # Apply rotations
                 with halo.rotate_x(xrotation).rotate_y(yrotation):
                     key = f'x{xrotation:03d}y{yrotation:03d}'
-                    sb_dict = self.process_orientation(halo.s[ImageSpace], width, Rhalf)
+                    sb_dict = self.process_orientation(particles[ImageSpace], width, Rhalf)
 
                 # Store result with lock to avoid conflicts
                 with p.lock:
@@ -430,30 +615,173 @@ class ImageHalo(PynbodyPropertyCalculation):
 
         # Unpack results from shared dictionary
         orientations = list(shared_dict.keys())
-        #initialize lists
+
+        # Initialize lists for all possible outputs
         images = []
         reff_values = []
-        profile_sb_v = []
-        profile_v_lum_den = []
+
+        # Shared properties (same across all imaging types for this particle type)
         profile_rbins = []
-        profile_lum_den = []
-        profile_mags_v = []
         profile_binarea = []
+
+        # Imaging-specific properties
+        profile_sb = []
+        profile_lum_den = []
+        profile_mags = []
+        profile_lum_den_calc = []
+        profile_rho = []
+
         for key in orientations:
             images.append(shared_dict[key]['image'])
             reff_values.append(shared_dict[key]['Reff'])
-            profile_sb_v.append(shared_dict[key]['sb,v'])
-            profile_v_lum_den.append(shared_dict[key]['v_lum_den'])
             profile_rbins.append(shared_dict[key]['rbins'])
-            profile_lum_den.append(shared_dict[key]['lum_den'])
-            profile_mags_v.append(shared_dict[key]['mags,v'])
             profile_binarea.append(shared_dict[key]['binarea'])
 
+            # Add imaging-specific data if it exists
+            if f'sb_{self.imaging_qty.split("_")[0]}' in shared_dict[key]:
+                profile_sb.append(shared_dict[key][f'sb_{self.imaging_qty.split("_")[0]}'])
+            if self.imaging_qty in shared_dict[key]:
+                profile_lum_den.append(shared_dict[key][self.imaging_qty])
+            if f'mags_{self.imaging_qty.split("_")[0]}' in shared_dict[key]:
+                profile_mags.append(shared_dict[key][f'mags_{self.imaging_qty.split("_")[0]}'])
+            if 'lum_den' in shared_dict[key]:
+                profile_lum_den_calc.append(shared_dict[key]['lum_den'])
+            if 'rho' in shared_dict[key]:
+                profile_rho.append(shared_dict[key]['rho'])
 
-        return images, reff_values, orientations, Rhalf, profile_sb_v, profile_v_lum_den, profile_rbins, profile_lum_den, profile_mags_v, profile_binarea
-    def calculate(self,halo,existing_properties):
+        # Return all the data - subclasses will select what they need
+        return {
+            'images': images,
+            'reff_values': reff_values,
+            'orientations': orientations,
+            'Rhalf': Rhalf,
+            'profile_rbins': profile_rbins,
+            'profile_binarea': profile_binarea,
+            'profile_sb': profile_sb,
+            'profile_lum_den': profile_lum_den,
+            'profile_mags': profile_mags,
+            'profile_lum_den_calc': profile_lum_den_calc,
+            'profile_rho': profile_rho
+        }
+
+    def calculate(self, halo, existing_properties):
         return self.process_halo(halo, existing_properties)
 
+
+# Specific subclasses for different bands and particle types
+
+class VBandStarImages(ImageHalo):
+    """V-band images for stellar particles"""
+    names = ['halo_images_v', 'image_reffs_v', 'image_orientations_v', 'Rhalf_v',
+             'profile_sb_v', 'profile_v_lum_den', 'profile_rbins_v',
+             'profile_lum_den_v', 'profile_mags_v', 'profile_binarea_v']
+
+    imaging_qty = 'V_lum_den'
+    imaging_units = 'kpc^-2'
+    particle_type_attr = 's'
+    sb_profile_key = 'sb,V'
+    lum_den_key = 'V_lum_den'
+    magnitude_key = 'magnitudes,V'
+
+    def calculate(self, halo, existing_properties):
+        data = self.process_halo(halo, existing_properties)
+        return (data['images'], data['reff_values'], data['orientations'], data['Rhalf'],
+                data['profile_sb'], data['profile_lum_den'], data['profile_rbins'],
+                data['profile_lum_den_calc'], data['profile_mags'], data['profile_binarea'])
+
+
+class UBandStarImages(ImageHalo):
+    """U-band images for stellar particles"""
+    names = ['halo_images_u', 'image_reffs_u', 'image_orientations_u', 'Rhalf_u',
+             'profile_sb_u', 'profile_u_lum_den', 'profile_rbins_u',
+             'profile_lum_den_u', 'profile_mags_u', 'profile_binarea']
+
+    imaging_qty = 'U_lum_den'
+    imaging_units = 'kpc^-2'
+    particle_type_attr = 's'
+    sb_profile_key = 'sb,U'
+    lum_den_key = 'U_lum_den'
+    magnitude_key = 'magnitudes,U'
+
+    def calculate(self, halo, existing_properties):
+        data = self.process_halo(halo, existing_properties)
+        return (data['images'], data['reff_values'], data['orientations'], data['Rhalf'],
+                data['profile_sb'], data['profile_lum_den'], data['profile_rbins'],
+                data['profile_lum_den_calc'], data['profile_mags'], data['profile_binarea'])
+
+
+class IBandStarImages(ImageHalo):
+    """I-band images for stellar particles"""
+    names = ['halo_images_i', 'image_reffs_i', 'image_orientations_i', 'Rhalf_i',
+             'profile_sb_i', 'profile_i_lum_den', 'profile_rbins_i',
+             'profile_lum_den_i', 'profile_mags_i', 'profile_binarea_i']
+
+    imaging_qty = 'I_lum_den'
+    imaging_units = 'kpc^-2'
+    particle_type_attr = 's'
+    sb_profile_key = 'sb,I'
+    lum_den_key = 'I_lum_den'
+    magnitude_key = 'magnitudes,I'
+
+    def calculate(self, halo, existing_properties):
+        data = self.process_halo(halo, existing_properties)
+        return (data['images'], data['reff_values'], data['orientations'], data['Rhalf'],
+                data['profile_sb'], data['profile_lum_den'], data['profile_rbins'],
+                data['profile_lum_den_calc'], data['profile_mags'], data['profile_binarea'])
+
+
+class MassDensityStarImages(ImageHalo):
+    """Mass density images for stellar particles"""
+    names = ['halo_images_rho_stars', 'image_reffs_rho_stars', 'image_orientations_stars', 'Rhalf_rho_stars',
+             'profile_rho_stars', 'profile_rbins_stars', 'profile_binarea_stars']
+
+    imaging_qty = 'rho'
+    imaging_units = 'Msol kpc^-3'
+    particle_type_attr = 's'
+    sb_profile_key = None
+    lum_den_key = None
+    magnitude_key = None
+
+    def calculate(self, halo, existing_properties):
+        data = self.process_halo(halo, existing_properties)
+        return (data['images'], data['reff_values'], data['orientations'], data['Rhalf'],
+                data['profile_rho'], data['profile_rbins'], data['profile_binarea'])
+
+
+class MassDensityDMImages(ImageHalo):
+    """Mass density images for dark matter particles"""
+    names = ['halo_images_rho_dm', 'image_reffs_rho_dm', 'image_orientations_dm', 'Rhalf_rho_dm',
+             'profile_rho_dm', 'profile_rbins_dm', 'profile_binarea_dm']
+
+    imaging_qty = 'rho'
+    imaging_units = 'Msol kpc^-3'
+    particle_type_attr = 'dm'
+    sb_profile_key = None
+    lum_den_key = None
+    magnitude_key = None
+
+    def calculate(self, halo, existing_properties):
+        data = self.process_halo(halo, existing_properties)
+        return (data['images'], data['reff_values'], data['orientations'], data['Rhalf'],
+                data['profile_rho'], data['profile_rbins'], data['profile_binarea'])
+
+
+class MassDensityGasImages(ImageHalo):
+    """Mass density images for gas particles"""
+    names = ['halo_images_rho_gas', 'image_reffs_rho_gas', 'image_orientations_gas', 'Rhalf_rho_gas',
+             'profile_rho_gas', 'profile_rbins_gas', 'profile_binarea_gas']
+
+    imaging_qty = 'rho'
+    imaging_units = 'Msol kpc^-3'
+    particle_type_attr = 'g'
+    sb_profile_key = None
+    lum_den_key = None
+    magnitude_key = None
+
+    def calculate(self, halo, existing_properties):
+        data = self.process_halo(halo, existing_properties)
+        return (data['images'], data['reff_values'], data['orientations'], data['Rhalf'],
+                data['profile_rho'], data['profile_rbins'], data['profile_binarea'])
 
 
 
@@ -471,7 +799,7 @@ class IsophoteAnalysis(LivePropertyCalculation):
 
     def __init__(self, simulation):
         super().__init__(simulation)
-        self.visualization_enabled = True  # Set to True to enable visualizations
+        self.visualization_enabled = False  # Set to True to enable visualizations
 
     def estimate_initial_params(self, image, reff, kpc_per_pixel, plot=False):
         """Estimate ellipse parameters using image moments with visualization"""
@@ -712,7 +1040,7 @@ class IsophoteAnalysis(LivePropertyCalculation):
                         fix_center=False,
                         fix_eps=False,
                         fix_pa=False,
-                        sclip=2.,
+                        sclip=2.5,
                         nclip=3
                     )
 
@@ -811,12 +1139,17 @@ class IsophoteAnalysis(LivePropertyCalculation):
 
         if not all(target_radii_met.values()):
             # logger.info("\n--- Relaxing gradient error threshold to fill missing target radii ---")
+            i = 0
+            relaxed_threshold = 0.1
 
             # Starting from slightly above our initial threshold, gradually increase up to a maximum
-            max_threshold = 0.5  # Maximum threshold we'll accept
-            threshold_steps = [0.15, 0.2, 0.3, 0.4, 0.5]  # Gradually increasing thresholds
-
-            for relaxed_threshold in threshold_steps:
+            while not all(target_radii_met.values()):
+                i = i + 1
+                relaxed_threshold *= 1.2  # Increase threshold by 20% each iteration
+                # Ensure this doesn't repeat too many times
+                if i > 50:
+                    logger.warning("Relaxed threshold exceeded maximum iterations, stopping.")
+                    break
                 # logger.info(f"Trying relaxed threshold: {relaxed_threshold:.2f}")
 
                 # Go through all our previous fitting results with the relaxed threshold
@@ -1208,17 +1541,205 @@ class r_80(PynbodyPropertyCalculation):
 
 
 
-class Shape_Profile(PynbodyPropertyCalculation):
-    """
-    Calculate the axis ratio of the stellar and dark matter components of a halo, only for where stars and dark matter both exist.
-    """
-    names = ['ba_s', 'ca_s', 'rbins_s', 'ba_d', 'ca_d', 'rbins_d']
+# class Shape_Profile(PynbodyPropertyCalculation):
+#     """
+#     Calculate the axis ratio of the stellar and dark matter components of a halo, only for where stars and dark matter both exist.
+#     """
+#     names = ['ba_s', 'ca_s', 'rbins_s', 'ba_d', 'ca_d', 'rbins_d','ba_g', 'ca_g', 'rbins_g']
+#
+#     def __init__(self, simulation):
+#         super().__init__(simulation)
+#
+#     @staticmethod
+#     def process_shape(particles, rin, rout, bins):
+#         rbins, axis_lengths, num_particles, rotations = shape(particles,
+#                                                               nbins=bins,
+#                                                               ndim=3, rmin=rin,
+#                                                               rmax=rout,
+#                                                               max_iterations=175,
+#                                                               tol=5e-3,
+#                                                               justify=False)
+#         ba = axis_lengths[:, 1] / axis_lengths[:, 0]
+#         ca = axis_lengths[:, 2] / axis_lengths[:, 0]
+#         shape_dict = {'ba': ba, 'ca': ca, 'rbins': rbins}
+#         return shape_dict
+#
+#     def _get_shape(self, halo):
+#         nan_array= np.array([np.nan]*100)
+#         nan_dict  = {'ba': nan_array, 'ca': nan_array, 'rbins': nan_array}
+#         halo.physical_units()
+#         pynbody.analysis.angmom.faceon(halo)
+#         rin = 0.1
+#         rout = None
+#         # Find the stellar shape of the halo
+#         try:
+#             # Find the number of particles in the halo
+#             N_star = len(halo.s)
+#             if N_star == 0:
+#                 starshape = nan_dict
+#             else:
+#                 # Find the number of bins to use
+#                 bins = int(get_bins(N_star))
+#                 starshape = self.process_shape(halo.s, rin, rout, bins)
+#
+#         except Exception as e:
+#             #print(f'Error in halo {halo}: {e}')
+#             #raise error
+#             print(N_star)
+#             raise e
+#             traceback.print_exc()
+#             starshape = nan_dict
+#         try:
+#             N_dm = len(halo.dm)
+#             bins = get_bins(N_dm)
+#             darkshape = self.process_shape(halo.dm, rin, rout, bins)
+#
+#         except Exception as e:
+#             #print(f'Error in halo {halo}: {e}')
+#             traceback.print_exc()
+#             darkshape = nan_dict
+#             raise e
+#         try:
+#             n_g = len(halo.g)
+#             bins = get_bins(n_g)
+#             gasshape = self.process_shape(halo.g, rin, rout, bins)
+#         except Exception as e:
+#             #print(f'Error in halo {halo}: {e}')
+#             traceback.print_exc()
+#             gasshape = nan_dict
+#             raise e
+#         return starshape, darkshape, gasshape
+#
+#     def calculate(self, halo, existing_properties):
+#         starshape,darkshape,gasshape = self._get_shape(halo)
+#         ba_s, ca_s, rbins_s = starshape['ba'], starshape['ca'], starshape['rbins']
+#         ba_d, ca_d, rbins_d = darkshape['ba'], darkshape['ca'], darkshape['rbins']
+#         ba_g, ca_g, rbins_g = gasshape['ba'], gasshape['ca'], gasshape['rbins']
+#
+#         return ba_s, ca_s, rbins_s, ba_d, ca_d, rbins_d, ba_g, ca_g, rbins_g
+#
+#
+#     def plot_xlog(self):
+#         return False
+#
+#     def plot_ylog(self):
+#         return False
+#
+#     def plot_xlabel(self):
+#         return r'$r_{bins}$ (kpc)'
+#     def plot_ylabel(self):
+#         return r'$b/a or c/a$'
+#
+#     def plot_xvalues(self,for_data):
+#         # need someway to find out if this is the stellar or dark matter profile and return the correct rbins
+#         return
 
-    def __init__(self, simulation):
-        super().__init__(simulation)
+
+from tangos.properties.pynbody import PynbodyPropertyCalculation
+import numpy as np
+import pynbody
+
+
+class StarFormationProfile(PynbodyPropertyCalculation):
+    """
+    Calculate star formation rate profile and edge radius for a halo.
+
+    This class computes two key properties related to star formation in a halo:
+
+    1. R_edge: The radius at which star formation effectively ceases, defined as the
+       smallest radius where the normalized star formation rate (s_sfr) drops to
+       zero or below. This represents the "edge" of active star formation.
+
+    2. s_sfr_profile: The normalized star formation rate profile, calculated as the
+       ratio of newly formed stellar mass to total stellar mass in radial bins.
+       This profile shows how star formation efficiency varies with radius.
+
+    The calculation:
+    - Orients the halo face-on for consistent radial measurements
+    - Identifies newly formed stars within a specified lookback time (default 100 Myr)
+    - Creates radial profiles for both newly formed and total stellar mass
+    - Computes the normalized star formation rate (s_sfr) as their ratio
+    - Determines R_edge as the first radius where star formation ceases
+
+    Attributes:
+        lookback_time (float): Time period in Myr to define "newly formed" stars.
+                              Default is 100 Myr.
+
+    Example:
+        # Use default 100 Myr lookback time
+        calculator = StarFormationProfile()
+
+        # Use custom 50 Myr lookback time
+        calculator = StarFormationProfile(lookback_time=50.0)
+
+        # Use custom 200 Myr lookback time
+        calculator = StarFormationProfile(lookback_time=200.0)
+    """
+    names = ["R_edge", "s_sfr_profile"]
+
+    def __init__(self, lookback_time=100.0):
+        """
+        Initialize the StarFormationProfile calculator.
+
+        Parameters:
+            lookback_time (float): Time period in Myr to consider stars as
+                                  "newly formed". Default is 100 Myr.
+        """
+        super().__init__()
+        self.lookback_time = lookback_time
+
+    def calculate(self, particle_data, existing_properties):
+        """
+        Calculate the star formation profile and edge radius.
+
+        Returns:
+            tuple: (R_edge, s_sfr_profile) where:
+                - R_edge: Radius where star formation ceases (float)
+                - s_sfr_profile: Normalized star formation rate vs radius (array)
+        """
+        halo = particle_data
+
+        # Set physical units and orient face-on for consistent radial measurements
+        halo.physical_units()
+        pynbody.analysis.angmom.faceon(halo)
+
+        # Find newly formed stars in the specified lookback time
+        newly_formed_stars = halo.s[halo.s['tform'] > (halo.s['tform'].max() - self.lookback_time * pynbody.units.Myr)]
+
+        # Create profiles
+        prof_sfr = pynbody.analysis.profile.Profile(newly_formed_stars, type='lin', min=0.1,
+                                                    max=halo.s['r'].max(), ndim=2,
+                                                    nbins=int((5 * halo.s['r'].max()) / 0.1))
+
+        prof = pynbody.analysis.profile.Profile(halo.s, type='lin', min=0.1,
+                                                max=halo.s['r'].max(), ndim=2,
+                                                nbins=int((5 * halo.s['r'].max()) / 0.1))
+
+        # Calculate s_sfr (star formation rate profile)
+        s_sfr = prof_sfr['mass'] / prof['mass']
+
+        # Calculate r_edge as the smallest radius where s_sfr <= 0
+        # Handle case where no bins meet the criteria
+        valid_bins = s_sfr <= 0
+        if np.any(valid_bins):
+            r_edge = np.min(prof_sfr['rbins'][valid_bins])
+        else:
+            r_edge = np.nan  # or some default value
+
+        # Return values in the same order as names
+        return r_edge, s_sfr
+
+
+
+
+class BaseShapeCalculator:
+    """
+    Base class containing the core shape calculation logic.
+    """
 
     @staticmethod
     def process_shape(particles, rin, rout, bins):
+        """Process shape calculation for given particles"""
         rbins, axis_lengths, num_particles, rotations = shape(particles,
                                                               nbins=bins,
                                                               ndim=3, rmin=rin,
@@ -1231,49 +1752,35 @@ class Shape_Profile(PynbodyPropertyCalculation):
         shape_dict = {'ba': ba, 'ca': ca, 'rbins': rbins}
         return shape_dict
 
-    def _get_shape(self, halo):
-        nan_array= np.array([np.nan]*100)
-        nan_dict  = {'ba': nan_array, 'ca': nan_array, 'rbins': nan_array}
+    def calculate_component_shape(self, halo, rin=0.1, rout=None):
+        """
+        Calculate shape for this component with error handling.
+        Returns nan_dict if calculation fails or no particles exist.
+        """
+        nan_array = np.array([np.nan] * 100)
+        nan_dict = {'ba': nan_array, 'ca': nan_array, 'rbins': nan_array}
+
+        # Prepare halo
         halo.physical_units()
         pynbody.analysis.angmom.faceon(halo)
-        rin = 0.1
-        rout = None
-        # Find the stellar shape of the halo
+
         try:
-            # Find the number of particles in the halo
-            N_star = len(halo.s)
-            if N_star == 0:
-                starshape = nan_dict
-            else:
-                # Find the number of bins to use
-                bins = int(get_bins(N_star))
-                starshape = self.process_shape(halo.s, rin, rout, bins)
+            particles = self.get_particles(halo)
+            n_particles = len(particles)
+            if n_particles == 0:
+                return nan_dict
+
+            bins = int(get_bins(n_particles))
+            return self.process_shape(particles, rin, rout, bins)
 
         except Exception as e:
-            #print(f'Error in halo {halo}: {e}')
-            #raise error
-            print(N_star)
-            raise e
+            print(f'Error calculating {self.component_name} shape: {e}')
             traceback.print_exc()
-            starshape = nan_dict
-        try:
-            N_dm = len(halo.dm)
-            bins = get_bins(N_dm)
-            darkshape = self.process_shape(halo.dm, rin, rout, bins)
-                
-        except Exception as e:
-            #print(f'Error in halo {halo}: {e}')
-            traceback.print_exc()
-            darkshape = nan_dict
             raise e
-        return starshape, darkshape
 
-    def calculate(self, halo, existing_properties):
-        starshape,darkshape = self._get_shape(halo)
-        ba_s, ca_s, rbins_s = starshape['ba'], starshape['ca'], starshape['rbins']
-        ba_d, ca_d, rbins_d = darkshape['ba'], darkshape['ca'], darkshape['rbins']
-        return ba_s, ca_s, rbins_s, ba_d, ca_d, rbins_d
-
+    def get_particles(self, halo):
+        """Override in subclasses to specify which particles to use"""
+        raise NotImplementedError("Subclasses must implement get_particles")
 
     def plot_xlog(self):
         return False
@@ -1283,13 +1790,88 @@ class Shape_Profile(PynbodyPropertyCalculation):
 
     def plot_xlabel(self):
         return r'$r_{bins}$ (kpc)'
-    def plot_ylabel(self):
-        return r'$b/a or c/a$'
 
-    def plot_xvalues(self,for_data):
-        # need someway to find out if this is the stellar or dark matter profile and return the correct rbins
-        return
-        
+    def plot_ylabel(self):
+        return r'$b/a$ or $c/a$'
+
+
+class StellarShape(BaseShapeCalculator, PynbodyPropertyCalculation):
+    """Calculate stellar component shape profile"""
+
+    names = ['ba_s', 'ca_s', 'rbins_s']
+    component_name = 'stellar'
+
+    def __init__(self, simulation):
+        PynbodyPropertyCalculation.__init__(self, simulation)
+
+    def get_particles(self, halo):
+        """Get stellar particles from halo"""
+        return halo.s
+
+    def calculate(self, halo, existing_properties):
+        """Calculate stellar shape"""
+        shape_dict = self.calculate_component_shape(halo)
+        return shape_dict['ba'], shape_dict['ca'], shape_dict['rbins']
+
+    def plot_xvalues(self, for_data):
+        """Return stellar radial bins for x-axis"""
+        return for_data['rbins_s']
+
+    def plot_ylabel(self):
+        return r'Stellar $b/a$ or $c/a$'
+
+
+class DarkMatterShape(BaseShapeCalculator, PynbodyPropertyCalculation):
+    """Calculate dark matter component shape profile"""
+
+    names = ['ba_d', 'ca_d', 'rbins_d']
+    component_name = 'dark_matter'
+
+    def __init__(self, simulation):
+        PynbodyPropertyCalculation.__init__(self, simulation)
+
+    def get_particles(self, halo):
+        """Get dark matter particles from halo"""
+        return halo.dm
+
+    def calculate(self, halo, existing_properties):
+        """Calculate dark matter shape"""
+        shape_dict = self.calculate_component_shape(halo)
+        return shape_dict['ba'], shape_dict['ca'], shape_dict['rbins']
+
+    def plot_xvalues(self, for_data):
+        """Return dark matter radial bins for x-axis"""
+        return for_data['rbins_d']
+
+    def plot_ylabel(self):
+        return r'Dark Matter $b/a$ or $c/a$'
+
+
+class GasShape(BaseShapeCalculator, PynbodyPropertyCalculation):
+    """Calculate gas component shape profile"""
+
+    names = ['ba_g', 'ca_g', 'rbins_g']
+    component_name = 'gas'
+
+    def __init__(self, simulation):
+        PynbodyPropertyCalculation.__init__(self, simulation)
+
+    def get_particles(self, halo):
+        """Get gas particles from halo"""
+        return halo.g
+
+    def calculate(self, halo, existing_properties):
+        """Calculate gas shape"""
+        shape_dict = self.calculate_component_shape(halo)
+        return shape_dict['ba'], shape_dict['ca'], shape_dict['rbins']
+
+    def plot_xvalues(self, for_data):
+        """Return gas radial bins for x-axis"""
+        return for_data['rbins_g']
+
+    def plot_ylabel(self):
+        return r'Gas $b/a$ or $c/a$'
+
 
 class SmoothAxisRatio(LivePropertyCalculation):
     names = ['ba_s_smoothed', 'ca_s_smoothed', 'ba_d_smoothed', 'ca_d_smoothed']
@@ -1526,17 +2108,35 @@ class BaryonicFractionVirial(PynbodyPropertyCalculation):
         return m_vir, m_star, m_gas, mb_mvir
 
 
-class DMDensityProfile(PynbodyPropertyCalculation):
-    names = ['rho_dm', 'rho_dm_rbins']
+class EdgeRadius(PynbodyPropertyCalculation):
+    """
+    Calculate the edge radius of a halo, defined as the radius where the star formation rate drops below a threshold.
+    """
+    names = ['edge_radius']
+
 
     def calculate(self, halo, existing_properties):
+        # Ensure halo is in physical units
         halo.physical_units()
         pynbody.analysis.angmom.faceon(halo)
-        prof = pynbody.analysis.profile.Profile(halo.dm, type='log', min=0.1,
-                                                ndim=3)
-        rbins = prof['rbins']
-        rho_dm = prof['density']
-        return rho_dm, rbins
+        # find all newly formed star particles in the last 100 Myr
+        newly_formed_stars = halo.s[halo.s['tform'] > (halo.s['tform'].max() - 100 * pynbody.units.Myr)]
+        #create a new property for the star formation rate
+        # halo.s['sfr'] = newly_formed_stars['mass'] / (100 * pynbody.units.Myr)
+        prof_sfr = pynbody.analysis.profile.Profile(halo.s[halo.s['sfr'] > 0], type='lin', min=0.1,
+                                                    max=5 * halo.s['r'].max(), ndim=2,
+                                                    nbins=int((5 * halo.s['r'].max()) / 0.1))
+
+        prof = pynbody.analysis.profile.Profile(halo.s, type='lin', min=0.1,
+                                                max=5 * halo.s['r'].max(), ndim=2,
+                                                nbins=int((5 * halo.s['r'].max()) / 0.1))
+
+        #get the specific star formation rate by dividing the mass of the new stars by all stars
+
+        s_sfr = prof_sfr['mass'] / prof['mass']
+        
+
+        return edge_radius
 
 
 
