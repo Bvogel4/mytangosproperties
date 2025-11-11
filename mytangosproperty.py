@@ -510,16 +510,36 @@ class ImageHalo(PynbodyPropertyCalculation):
         return par[1]  # Return fitted Reff
 
     def generate_image(self, particles, width):
-        """Generate image for the specified imaging quantity and units"""
+        """Generate image with smoothing appropriate for isophote fitting"""
         f = plt.figure(frameon=False)
         f.set_size_inches(10, 10)
         ax = plt.Axes(f, [0., 0., 1., 1.])
         ax.set_axis_off()
         f.add_axes(ax)
-        im = pynbody.plot.sph.image(particles, qty=self.imaging_qty, width=width,
-                                    subplot=ax, units=self.imaging_units, resolution=1000,
-                                    show_cbar=False, ret_im=True)
-        data = im.get_array()  # Get the numpy array
+
+        #set smooth floor approximately to gravitational softening length
+        try:
+            eps = particles['eps']
+        except KeyError:
+            eps = particles.properties['eps']
+
+        eps = np.median(eps)
+
+        smooth_floor = 3*eps
+
+        im = pynbody.plot.sph.image(
+            particles,
+            qty=self.imaging_qty,
+            width=width,
+            subplot=ax,
+            units=self.imaging_units,
+            resolution=1000,
+            smooth_floor=smooth_floor,  # <-- Key addition
+            denoise=False,  # <-- Optional
+            show_cbar=False,
+            ret_im=True
+        )
+        data = im.get_array()
         plt.close(f)
         return data
 
@@ -577,8 +597,10 @@ class ImageHalo(PynbodyPropertyCalculation):
 
         # Calculate half-light radius (or equivalent for mass density)
         if self.imaging_qty == 'rho':
-            # For mass density, use half-mass radius or similar
-            Rhalf = pynbody.analysis.luminosity.half_mass_r(particles)
+            #get V-band rhalf from existing properties if available
+            Rhalf = existing_properties.get('Rhalf_v', None)
+            if Rhalf is None:
+                Rhalf = pynbody.analysis.luminosity.half_light_r(halo)
         else:
             Rhalf = pynbody.analysis.luminosity.half_light_r(halo)
 
@@ -732,7 +754,7 @@ class IBandStarImages(ImageHalo):
 
 class MassDensityStarImages(ImageHalo):
     """Mass density images for stellar particles"""
-    names = ['halo_images_rho_stars', 'image_reffs_rho_stars', 'image_orientations_stars', 'Rhalf_rho_stars',
+    names = ['halo_images_rho_stars', 'image_reffs_rho_stars', 'image_orientations_rho_stars', 'Rhalf_rho_stars',
              'profile_rho_stars', 'profile_rbins_stars', 'profile_binarea_stars']
 
     imaging_qty = 'rho'
@@ -784,32 +806,113 @@ class MassDensityGasImages(ImageHalo):
                 data['profile_rho'], data['profile_rbins'], data['profile_binarea'])
 
 
-
-
 class IsophoteAnalysis(LivePropertyCalculation):
     """Analyzes isophotes to measure projected galaxy shapes at different radii.
 
     For each projection, we measure ellipticity and position angle at 2-4 Reff
     to track how galaxy shape varies with radius.
     """
-    names = 'isophote_parameters'
 
-    def requires_property(self):
-        return ['halo_images', 'image_reffs', 'image_orientations', 'Rhalf']
+    def __init__(self, simulation, image_type='v_stars'):
 
-    def __init__(self, simulation):
+        print('\ninitializing isophote analysis\n', image_type)
+
+        print('\n names', self.names)
+        """Initialize IsophoteAnalysis with specified image type.
+
+        Args:
+            simulation: The simulation object
+            image_type: Type of images to analyze. Options:
+                - 'v_stars': V-band stellar images (default)
+                - 'u_stars': U-band stellar images
+                - 'i_stars': I-band stellar images
+                - 'rho_stars': Mass density stellar images
+                - 'rho_dm': Mass density dark matter images
+                - 'rho_gas': Mass density gas images
+        """
         super().__init__(simulation)
+        self.image_type = image_type
         self.visualization_enabled = False  # Set to True to enable visualizations
 
-    def estimate_initial_params(self, image, reff, kpc_per_pixel, plot=False):
+        self.property_mappings = {
+            'v_stars': {
+                'images': 'halo_images_v',
+                'reffs': 'image_reffs_v',
+                'orientations': 'image_orientations_v',
+                'rhalf': 'Rhalf_v'
+            },
+            'u_stars': {
+                'images': 'halo_images_u',
+                'reffs': 'image_reffs_u',
+                'orientations': 'image_orientations_u',
+                'rhalf': 'Rhalf_u'
+            },
+            'i_stars': {
+                'images': 'halo_images_i',
+                'reffs': 'image_reffs_i',
+                'orientations': 'image_orientations_i',
+                'rhalf': 'Rhalf_i'
+            },
+            'rho_stars': {
+                'images': 'halo_images_rho_stars',
+                'reffs': 'image_reffs_rho_stars',
+                'orientations': 'image_orientations_rho_stars',
+                'rhalf': 'Rhalf_rho_stars'
+            },
+            'rho_dm': {
+                'images': 'halo_images_rho_dm',
+                'reffs': 'image_reffs_rho_dm',
+                'orientations': 'image_orientations_dm',
+                'rhalf': 'Rhalf_rho_dm'
+            },
+            'rho_gas': {
+                'images': 'halo_images_rho_gas',
+                'reffs': 'image_reffs_rho_gas',
+                'orientations': 'image_orientations_gas',
+                'rhalf': 'Rhalf_rho_gas'
+            }
+        }
+        # Validate image type
+        if self.image_type not in self.property_mappings:
+            available_types = list(self.property_mappings.keys())
+            raise ValueError(f"Unknown image type: {self.image_type}. Available types: {available_types}")
+
+        # Set the names property based on image type
+        #self.names = f'isophote_parameters_{self.image_type}'
+
+    def requires_property(self):
+        #raise an error if not set ( needs to be overridden in subclasses)
+        raise NotImplementedError("Subclasses must implement requires_property() to specify required properties.")
+
+    def check_properties_exist(self, existing_properties):
+        """Check if all required properties exist for the specified image type.
+
+        Args:
+            existing_properties: Dictionary of existing properties
+
+        Raises:
+            ValueError: If required properties are missing
+        """
+        required_props = self.requires_property()
+        missing_props = []
+
+        for prop in required_props:
+            if prop not in existing_properties:
+                missing_props.append(prop)
+
+        if missing_props:
+            raise ValueError(f"Missing required properties for image type '{self.image_type}': {missing_props}")
+
+    @staticmethod
+    def estimate_initial_params(image, reff, kpc_per_pixel, plot=False):
         """Estimate ellipse parameters using image moments with visualization"""
-        #logger.info("Estimating initial parameters from image moments")
+        # logger.info("Estimating initial parameters from image moments")
 
         # Threshold image to separate galaxy from background
         threshold = np.median(image)
 
         # get binary image of values near the threshold
-        binary_image = np.where((image > 5*threshold) & (image <20*threshold), 1, 0)
+        binary_image = np.where((image > 5 * threshold) & (image < 20 * threshold), 1, 0)
 
         # Show the original image
         if plot:
@@ -823,32 +926,31 @@ class IsophoteAnalysis(LivePropertyCalculation):
             plt.imshow(binary_image, origin='lower', cmap='gray')
             plt.title(f'Thresholded Image (threshold={threshold:.2f})')
 
-
         # Calculate moments
         m = moments(binary_image)
-        #logger.info(f"Zero-order moment (total mass): {m[0, 0]}")
+        # logger.info(f"Zero-order moment (total mass): {m[0, 0]}")
 
         if m[0, 0] == 0:  # No pixels above threshold
             logger.warning("No pixels above threshold, using image center")
             return image.shape[0] / 2, image.shape[1] / 2, 0.1, 0, 3.0
 
         # Calculate centroid
-        #centroid_y, centroid_x = m[1, 0] / m[0, 0], m[0, 1] / m[0, 0]
-        #set centroid to be center of image
+        # centroid_y, centroid_x = m[1, 0] / m[0, 0], m[0, 1] / m[0, 0]
+        # set centroid to be center of image
         centroid_y, centroid_x = image.shape[0] / 2, image.shape[1] / 2
-        #logger.info(f"Centroid: x={centroid_x:.2f}, y={centroid_y:.2f}")
+        # logger.info(f"Centroid: x={centroid_x:.2f}, y={centroid_y:.2f}")
 
         # Central moments for shape estimation
         mu = moments_central(binary_image, (centroid_y, centroid_x))
 
         # Covariance matrix
         cov = np.array([[mu[2, 0], mu[1, 1]], [mu[1, 1], mu[0, 2]]]) / mu[0, 0]
-        #logger.info(f"Covariance matrix:\n{cov}")
+        # logger.info(f"Covariance matrix:\n{cov}")
 
         # Eigenvalues give us axis lengths
         evals, evecs = np.linalg.eig(cov)
-        #logger.info(f"Eigenvalues: {evals}")
-        #logger.info(f"Eigenvectors:\n{evecs}")
+        # logger.info(f"Eigenvalues: {evals}")
+        # logger.info(f"Eigenvectors:\n{evecs}")
 
         # Check for negative eigenvalues (numerical instability)
         if np.any(evals <= 0):
@@ -859,22 +961,22 @@ class IsophoteAnalysis(LivePropertyCalculation):
         b = np.sqrt(evals[1])  # Minor axis
 
         # compute angle
-        #logger.info(f"Vector for angle calculation: y={evecs[0, 0]}, x={evecs[0, 1]}")
+        # logger.info(f"Vector for angle calculation: y={evecs[0, 0]}, x={evecs[0, 1]}")
         angle = np.arctan2(evecs[0, 0], evecs[0, 1])
         # check that a > b
         if a < b:
-            #logger.warning("Major axis is smaller than minor axis, swapping values")
+            # logger.warning("Major axis is smaller than minor axis, swapping values")
             a, b = b, a
             # rotate angle by 90 degrees
             angle += np.pi / 2
 
-        #logger.info(f"Major axis: {a:.2f}, Minor axis: {b:.2f}")
+        # logger.info(f"Major axis: {a:.2f}, Minor axis: {b:.2f}")
 
         # Ellipticity and position angle
         eps = 1.0 - (b / a)
         eps = min(0.85, max(0.01, eps))  # Constrain ellipticity
-        #logger.info(f"Initial ellipticity: {eps:.2f}")
-        #logger.info(f"Initial position angle: {angle:.2f} radians")
+        # logger.info(f"Initial ellipticity: {eps:.2f}")
+        # logger.info(f"Initial position angle: {angle:.2f} radians")
 
         # Estimate a good starting radius from moments
         estimated_radius = np.sqrt(np.mean([mu[2, 0], mu[0, 2]]) / mu[0, 0])
@@ -882,8 +984,8 @@ class IsophoteAnalysis(LivePropertyCalculation):
         radius_factor = estimated_radius / (reff / kpc_per_pixel)
         # Constrain to reasonable values
         radius_factor = min(4.5, max(2.5, radius_factor))
-        #logger.info(f"Estimated radius: {estimated_radius:.2f} pixels")
-        #logger.info(f"Radius factor (x Reff): {radius_factor:.2f}")
+        # logger.info(f"Estimated radius: {estimated_radius:.2f} pixels")
+        # logger.info(f"Radius factor (x Reff): {radius_factor:.2f}")
 
         # Visualize the estimated ellipse
         if plot:
@@ -916,534 +1018,245 @@ class IsophoteAnalysis(LivePropertyCalculation):
         return centroid_x, centroid_y, eps, angle, radius_factor
 
     def fit_single_image(self, image_data, radius, step_size_factors, center, eps, pa, sma_factor,
-                         kpc_per_pixel, plot=False):
-        """Fit ellipse with moment-based parameters and return results with visualization"""
-        #logger.info("Starting isophote fitting")
-        #logger.info(f"Effective radius: {radius:.2f} kpc")
-        #logger.info(f"Scale: {kpc_per_pixel:.4f} kpc/pixel")
-        #logger.info(f"Initial parameters: center={center}, eps={eps:.2f}, pa={pa:.2f}, sma_factor={sma_factor:.2f}")
+                         kpc_per_pixel, plot=True, apply_smoothing=True, smoothing_kpc=0.1):
+        """
+        Simplified ellipse fitting with optional image smoothing.
 
+        Args:
+            image_data: 2D array of image data
+            radius: Effective radius in kpc
+            center: Initial center guess (x, y)
+            eps: Initial ellipticity guess
+            pa: Initial position angle guess
+            sma_factor: Initial radius factor for starting SMA
+            kpc_per_pixel: Scale conversion
+            plot: Whether to visualize results
+            apply_smoothing: Whether to apply Gaussian smoothing
+            smoothing_kpc: Smoothing scale in kpc (default 0.5 kpc)
+        """
+        from scipy.ndimage import gaussian_filter
+        from scipy.interpolate import interp1d
+
+        # Apply smoothing if requested
+        # if apply_smoothing:
+        #     # Convert smoothing scale from kpc to pixels
+        #     smoothing_pixels = smoothing_kpc / kpc_per_pixel
+        #     sigma = smoothing_pixels / 2.355  # Convert FWHM to sigma
+        #
+        #     # Apply Gaussian smoothing
+        #     image_data = gaussian_filter(image_data, sigma=sigma)
+        #     logger.info(f"Applied Gaussian smoothing with sigma={sigma:.2f} pixels ({smoothing_kpc:.2f} kpc)")
+
+        # Convert radius to pixels
         radius_pixels = radius / kpc_per_pixel
-        #logger.info(f"Effective radius: {radius_pixels:.2f} pixels")
 
-        # Track good isophotes
-        good_isophotes = {}  # Will store successful fits indexed by sma in pixels
-
-        # Track which target radii (2, 3, 4 * Reff) have been successfully measured
+        # Define target radii we want to measure
         target_multipliers = [2.0, 3.0, 4.0]
-        target_radii = {mult: mult * radius for mult in target_multipliers}
-        target_radii_met = {mult: False for mult in target_multipliers}
+        target_radii_kpc = {mult: mult * radius for mult in target_multipliers}
 
-        #logger.info(f"Target radii: {target_radii}")
-
-        # Initial ellipse geometry with original guess
+        # Set up initial geometry
         geometry = EllipseGeometry(
-            x0=center[0], y0=center[1],
-            sma=sma_factor * radius_pixels,
+            x0=center[0],
+            y0=center[1],
+            sma=sma_factor * radius_pixels,  # Use the initial guess from estimate_initial_params
             eps=eps,
             pa=pa
         )
-        #logger.info(f"Initial geometry: {geometry}")
 
-        # Start with the full range
-        min_sma = 0.75 * radius_pixels
-        max_sma = 4.5 * radius_pixels
-        #logger.info(f"SMA range: {min_sma:.2f} to {max_sma:.2f} pixels")
+        # Single ellipse fitting attempt with geometric scaling
+        min_sma = 1.0 * radius_pixels  # Start at 1 Reff
+        max_sma = 5.0 * radius_pixels  # Go up to 5 Reff
+        step = 0.1  # Geometric step factor
 
-        # Base step size
-        base_step = 1/8
+        try:
+            ellipse = Ellipse(image_data, geometry)
+            isolist = ellipse.fit_image(
+                minsma=min_sma,
+                maxsma=max_sma,
+                sma0=geometry.sma,
+                linear=False,  # Use geometric scaling
+                step=step,     # Geometric factor: sma *= (1 + step)
+                maxit=50,      # Reduced iterations for speed
+                minit=10,
+                fix_center=False,
+                fix_eps=False,
+                fix_pa=False,
+                sclip=3.0,
+                nclip=2
+            )
 
-        all_fitting_results = []  # Store results from each step size for visualization
+            logger.info(f"Fitted {len(isolist.sma)} isophotes from {min_sma:.1f} to {max_sma:.1f} pixels")
 
-        # Try progressively smaller step sizes until we get good fits at all target radii
-        for step_idx, step_factor in enumerate(step_size_factors):
-            step = base_step * radius_pixels * step_factor
-            #logger.info(f"\n--- Using step size factor {step_factor} (step={step:.2f} pixels) ---")
+        except Exception as e:
+            logger.error(f"Ellipse fitting failed: {e}")
+            # Return empty result if fitting completely fails
+            return [], False
 
-            # Check if we've already met all targets
-            if all(target_radii_met.values()):
-                #logger.info("All target radii have been met, breaking loop")
-                break
+        # Process results
+        if len(isolist.sma) == 0:
+            logger.warning("No isophotes found")
+            return [], False
 
-            # Calculate which ranges we still need to fit
-            # Convert good_isophotes keys to kpc for comparison with target_radii
-            good_smas_kpc = np.array([sma * kpc_per_pixel for sma in good_isophotes.keys()])
+        # Convert SMA to kpc for easier handling
+        smas_kpc = isolist.sma * kpc_per_pixel
 
-            # Determine remaining ranges to fit
-            ranges_to_fit = []
+        # Filter for good quality fits (gradient error threshold)
+        good_mask = isolist.grad_r_error < 0.2  # Slightly relaxed threshold
 
-            if not good_smas_kpc.size:
-                # No good fits yet, fit the full range
-                ranges_to_fit.append((min_sma, max_sma))
-                #logger.info("No good fits yet, fitting full range")
-            else:
-                # Check which target radii haven't been met
-                for mult in target_multipliers:
-                    if not target_radii_met[mult]:
-                        target = target_radii[mult]
-                        # Find closest good fits below and above the target
-                        below_idx = np.where(good_smas_kpc < target)[0]
-                        above_idx = np.where(good_smas_kpc > target)[0]
+        if not np.any(good_mask):
+            logger.warning("No good quality isophotes found, using all available")
+            good_mask = np.ones(len(isolist.sma), dtype=bool)
 
-                        below_sma = good_smas_kpc[below_idx[-1]] / kpc_per_pixel if below_idx.size else min_sma
-                        above_sma = good_smas_kpc[above_idx[0]] / kpc_per_pixel if above_idx.size else max_sma
+        # Extract good isophotes
+        good_smas_kpc = smas_kpc[good_mask]
+        good_eps = isolist.eps[good_mask]
+        good_pa = isolist.pa[good_mask]
+        good_x0 = isolist.x0[good_mask]
+        good_y0 = isolist.y0[good_mask]
+        good_intens = isolist.intens[good_mask]
+        good_grad_error = isolist.grad_r_error[good_mask]
 
-                        # Only add range if there's a significant gap
-                        gap_threshold = 0.2 * radius_pixels
-                        if above_sma - below_sma > gap_threshold:
-                            ranges_to_fit.append((below_sma, above_sma))
-                            #logger.info(
-                                #f"Adding range: {below_sma:.2f} to {above_sma:.2f} pixels for target {mult}×Reff")
+        # Sort by SMA for interpolation
+        sort_idx = np.argsort(good_smas_kpc)
+        good_smas_kpc = good_smas_kpc[sort_idx]
+        good_eps = good_eps[sort_idx]
+        good_pa = good_pa[sort_idx]
+        good_x0 = good_x0[sort_idx]
+        good_y0 = good_y0[sort_idx]
+        good_intens = good_intens[sort_idx]
+        good_grad_error = good_grad_error[sort_idx]
 
-            # If no more ranges to fit, break
-            if not ranges_to_fit:
-                #logger.info("No more ranges to fit, breaking loop")
-                break
-
-            # Fit each remaining range
-            for range_idx, (range_min, range_max) in enumerate(ranges_to_fit):
-                #logger.info(
-                    #f"Fitting range {range_idx + 1}/{len(ranges_to_fit)}: {range_min:.2f} to {range_max:.2f} pixels")
-
-                # Get the closest good isophote to use as a starting point
-                if good_isophotes:
-                    # Find closest good isophote to the midpoint of our range
-                    midpoint = (range_min + range_max) / 2
-                    closest_sma = min(good_isophotes.keys(), key=lambda x: abs(x - midpoint))
-                    closest_iso = good_isophotes[closest_sma]
-
-                    #logger.info(f"Using closest good isophote at SMA={closest_sma:.2f} pixels as starting point")
-
-                    # Update geometry with values from the closest good isophote
-                    geometry = EllipseGeometry(
-                        x0=closest_iso['x0'],
-                        y0=closest_iso['y0'],
-                        sma=closest_sma,
-                        eps=closest_iso['eps'],
-                        pa=closest_iso['pa']
-                    )
-                    #logger.info(f"Updated geometry: {geometry}")
-
-                # Fit ellipses for this range
-                #logger.info(f"Fitting with SMA range: {range_min:.2f} to {range_max:.2f} pixels")
-
-                try:
-                    ellipse = Ellipse(image_data, geometry)
-                    isolist = ellipse.fit_image(
-                        minsma=range_min,
-                        maxsma=range_max,
-                        sma0=geometry.sma,
-                        linear=True,
-                        step=step,
-                        maxit=100,
-                        minit=20,
-                        fix_center=False,
-                        fix_eps=False,
-                        fix_pa=False,
-                        sclip=2.5,
-                        nclip=3
-                    )
-
-                    # Store this fitting result for visualization
-                    all_fitting_results.append({
-                        'step_factor': step_factor,
-                        'range': (range_min, range_max),
-                        'isolist': isolist
-                    })
-
-                    # Check if we got any valid isophotes
-                    if len(isolist.sma) == 0:
-                        #logger.info("No valid isophotes found in this range")
-                        #if it's the first step, let's retry our initial guess with a larger radius
-                        if step_factor == step_size_factors[0]:
-                            sma = geometry.sma
-                            for r_factor in [1.5,0.75,2.0,0.5,3.0,0.25]:
-                                try:
-                                    #logger.info("Trying initial guess with radius factor: {}".format(r_factor))
-                                    ellipse = Ellipse(image_data, geometry)
-                                    range_min = 2.5 * radius_pixels
-                                    range_max = 4.5 * radius_pixels
-                                    #ensure the range includes sma*r_factor
-                                    range_min = min(range_min, sma * r_factor)
-                                    range_max = max(range_max, sma * r_factor)
-
-                                    isolist = ellipse.fit_image(
-                                        minsma=range_min,
-                                        maxsma=range_max,
-                                        sma0=sma * r_factor,
-                                        linear=True,
-                                        step=step,
-                                        maxit=100,
-                                        minit=20,
-                                        fix_center=False,
-                                        fix_eps=False,
-                                        fix_pa=False,
-                                    )
-                                except Exception as e:
-                                    #logger.error(f"Error during fitting with radius factor {r_factor}: {e}")
-                                    continue
-                                if len(isolist.sma) > 0:
-                                    #logger.info(f'Found valid isophotes with radius factor: {r_factor}')
-                                    break
-
-                            #logger.info(f"Found {len(isolist.sma)} isophotes with larger radius")
-
-                    #logger.info(f"Found {len(isolist.sma)} isophotes")
-
-                    # Extract data and add good isophotes to our collection
-                    smas_kpc = isolist.sma * kpc_per_pixel
-
-                    for i in range(len(isolist.sma)):
-                        sma_pixels = isolist.sma[i]
-                        sma_kpc = smas_kpc[i]
-
-                        # Only consider good fits (gradient error below threshold)
-                        if isolist.grad_r_error[i] < 0.1:
-                            # Store the good isophote if it's better than what we have or if we don't have it
-                            if sma_pixels not in good_isophotes or isolist.grad_r_error[i] < good_isophotes[sma_pixels][
-                                'grad_error']:
-                                good_isophotes[sma_pixels] = {
-                                    'sma': sma_pixels,
-                                    'sma_kpc': sma_kpc,
-                                    'eps': isolist.eps[i],
-                                    'pa': isolist.pa[i],
-                                    'x0': isolist.x0[i],
-                                    'y0': isolist.y0[i],
-                                    'grad_error': isolist.grad_r_error[i],
-                                    'intens': isolist.intens[i],
-                                    'rms': isolist.rms[i]
-                                }
-
-                                #logger.info(f"Found good isophote at SMA={sma_pixels:.2f} pixels ({sma_kpc:.2f} kpc)")
-                                #logger.info(
-                                    #f"  e={isolist.eps[i]:.2f}, PA={isolist.pa[i]:.2f}, grad_err={isolist.grad_r_error[i]:.4f}")
-
-                            # Check if this isophote satisfies any of our target radii
-                            for mult in target_multipliers:
-                                target = target_radii[mult]
-                                # Allow a small tolerance (5%)
-                                if abs(sma_kpc - target) < 0.05 * target:
-                                    #if not target_radii_met[mult]:
-                                        #logger.info(
-                                            #f"Target {mult}×Reff ({target:.2f} kpc) met with isophote at {sma_kpc:.2f} kpc")
-                                    target_radii_met[mult] = True
-
-                except Exception as e:
-                    logger.error(f"Error during fitting: {e}")
-                    traceback.print_exc()
-
-        # Log which targets were met
-        # for mult in target_multipliers:
-        #     status = "✓" if target_radii_met[mult] else "✗"
-        #     logger.info(f"Target {mult}×Reff: {status}")
-
-        if not all(target_radii_met.values()):
-            # logger.info("\n--- Relaxing gradient error threshold to fill missing target radii ---")
-            i = 0
-            relaxed_threshold = 0.1
-
-            # Starting from slightly above our initial threshold, gradually increase up to a maximum
-            while not all(target_radii_met.values()):
-                i = i + 1
-                relaxed_threshold *= 1.2  # Increase threshold by 20% each iteration
-                # Ensure this doesn't repeat too many times
-                if i > 50:
-                    logger.warning("Relaxed threshold exceeded maximum iterations, stopping.")
-                    break
-                # logger.info(f"Trying relaxed threshold: {relaxed_threshold:.2f}")
-
-                # Go through all our previous fitting results with the relaxed threshold
-                for result in all_fitting_results:
-                    isolist = result['isolist']
-
-                    # Skip if no isophotes were found in this result
-                    if len(isolist.sma) == 0:
-                        continue
-
-                    smas_kpc = isolist.sma * kpc_per_pixel
-
-                    for i in range(len(isolist.sma)):
-                        sma_pixels = isolist.sma[i]
-                        sma_kpc = smas_kpc[i]
-
-                        # Apply relaxed threshold
-                        if isolist.grad_r_error[i] < relaxed_threshold:
-                            # Only add if this is better than what we have or we don't have it
-                            if (sma_pixels not in good_isophotes or
-                                    isolist.grad_r_error[i] < good_isophotes[sma_pixels]['grad_error']):
-                                good_isophotes[sma_pixels] = {
-                                    'sma': sma_pixels,
-                                    'sma_kpc': sma_kpc,
-                                    'eps': isolist.eps[i],
-                                    'pa': isolist.pa[i],
-                                    'x0': isolist.x0[i],
-                                    'y0': isolist.y0[i],
-                                    'grad_error': isolist.grad_r_error[i],
-                                    'intens': isolist.intens[i],
-                                    'rms': isolist.rms[i]
-                                }
-
-                                # logger.info(f"With relaxed threshold, found isophote at SMA={sma_pixels:.2f} pixels ({sma_kpc:.2f} kpc)")
-                                # logger.info(f"  e={isolist.eps[i]:.2f}, PA={isolist.pa[i]:.2f}, grad_err={isolist.grad_r_error[i]:.4f}")
-
-                            # Check if this isophote satisfies any target radii
-                            for mult in target_multipliers:
-                                if not target_radii_met[mult]:
-                                    target = target_radii[mult]
-                                    # Allow a small tolerance (5%)
-                                    if abs(sma_kpc - target) < 0.05 * target:
-                                        target_radii_met[mult] = True
-                                        # logger.info(f"Target {mult}×Reff ({target:.2f} kpc) met with relaxed threshold")
-
-                # Check if we've met all targets now
-                if all(target_radii_met.values()):
-                    # logger.info(f"All target radii met with relaxed threshold {relaxed_threshold:.2f}")
-                    break
-
-        # Convert our dictionary of good isophotes to the expected format for return
+        # Interpolate to get values at target radii
         result = []
-        for sma in sorted(good_isophotes.keys()):
-            iso = good_isophotes[sma]
-            result.append([
-                iso['sma'],
-                iso['eps'],
-                iso['pa'],
-                iso['grad_error'],
-                iso['x0'],
-                iso['y0'],
-                iso['intens'],
-                iso['rms']
-            ])
+        targets_met = {mult: False for mult in target_multipliers}
 
-        # Visualize the final results if requested
-        if plot:
-            self.visualize_results(image_data, good_isophotes, target_radii,
-                                   all_fitting_results, kpc_per_pixel)
+        # Check if we have enough points for interpolation
+        if len(good_smas_kpc) >= 2:
+            # Create interpolation functions
+            try:
+                # Use linear interpolation with bounds checking
+                f_eps = interp1d(good_smas_kpc, good_eps, kind='linear',
+                               bounds_error=False, fill_value='extrapolate')
+                f_pa = interp1d(good_smas_kpc, good_pa, kind='linear',
+                              bounds_error=False, fill_value='extrapolate')
+                f_x0 = interp1d(good_smas_kpc, good_x0, kind='linear',
+                              bounds_error=False, fill_value='extrapolate')
+                f_y0 = interp1d(good_smas_kpc, good_y0, kind='linear',
+                              bounds_error=False, fill_value='extrapolate')
 
-        return result, all(target_radii_met.values())
+                # For each target radius, either use exact match or interpolate
+                for mult in target_multipliers:
+                    target_kpc = target_radii_kpc[mult]
 
-    def visualize_results(self, image, good_isophotes, target_radii, all_fitting_results, kpc_per_pixel):
-        """Visualize the isophote fitting results"""
-        # Create a figure with multiple subplots
-        plt.figure(figsize=(18, 12))
+                    # Check if target is within our fitted range
+                    if good_smas_kpc[0] <= target_kpc <= good_smas_kpc[-1]:
+                        # Find closest exact match
+                        closest_idx = np.argmin(np.abs(good_smas_kpc - target_kpc))
+                        closest_sma_kpc = good_smas_kpc[closest_idx]
 
-        # Plot the image with all good isophotes
-        plt.subplot(2, 3, 1)
-        plt.imshow(np.log10(image), origin='lower', cmap='viridis', vmin=1)
+                        # If very close, use exact values
+                        if abs(closest_sma_kpc - target_kpc) < 0.05 * target_kpc:
+                            result.append([
+                                closest_sma_kpc / kpc_per_pixel,  # Convert back to pixels
+                                good_eps[closest_idx],
+                                good_pa[closest_idx],
+                                good_grad_error[closest_idx],
+                                good_x0[closest_idx],
+                                good_y0[closest_idx],
+                                good_intens[closest_idx],
+                                0.0  # RMS placeholder
+                            ])
+                            targets_met[mult] = True
+                            logger.info(f"Target {mult}×Reff: exact match at {closest_sma_kpc:.2f} kpc")
+                        else:
+                            # Interpolate
+                            interp_eps = float(f_eps(target_kpc))
+                            interp_pa = float(f_pa(target_kpc))
+                            interp_x0 = float(f_x0(target_kpc))
+                            interp_y0 = float(f_y0(target_kpc))
 
-        # Draw all good isophotes
-        from matplotlib.patches import Ellipse as MplEllipse
+                            result.append([
+                                target_kpc / kpc_per_pixel,  # Convert to pixels
+                                interp_eps,
+                                interp_pa,
+                                0.1,  # Estimated grad error for interpolated values
+                                interp_x0,
+                                interp_y0,
+                                0.0,  # Intensity placeholder
+                                0.0   # RMS placeholder
+                            ])
+                            targets_met[mult] = True
+                            logger.info(f"Target {mult}×Reff: interpolated at {target_kpc:.2f} kpc")
+                    else:
+                        logger.warning(f"Target {mult}×Reff ({target_kpc:.2f} kpc) outside fitted range "
+                                     f"[{good_smas_kpc[0]:.2f}, {good_smas_kpc[-1]:.2f}]")
 
-        # Different colors for different isophotes
-        colors = plt.cm.tab10(np.linspace(0, 1, len(good_isophotes)))
+            except Exception as e:
+                logger.error(f"Interpolation failed: {e}")
 
-        # Track which isophotes match our target radii
-        target_isophotes = {}
-        for mult, target_kpc in target_radii.items():
-            closest_sma = None
-            min_diff = float('inf')
+        # If we couldn't interpolate, at least return the closest matches we have
+        if not result and len(good_smas_kpc) > 0:
+            logger.warning("Could not interpolate; returning closest available isophotes")
+            for mult in target_multipliers:
+                target_kpc = target_radii_kpc[mult]
+                closest_idx = np.argmin(np.abs(good_smas_kpc - target_kpc))
 
-            for sma_pix, iso in good_isophotes.items():
-                sma_kpc = iso['sma_kpc']
-                diff = abs(sma_kpc - target_kpc)
+                result.append([
+                    good_smas_kpc[closest_idx] / kpc_per_pixel,
+                    good_eps[closest_idx],
+                    good_pa[closest_idx],
+                    good_grad_error[closest_idx],
+                    good_x0[closest_idx],
+                    good_y0[closest_idx],
+                    good_intens[closest_idx],
+                    0.0
+                ])
 
-                if diff < min_diff and diff < 0.05 * target_kpc:
-                    min_diff = diff
-                    closest_sma = sma_pix
+        # # Visualization if requested
+        # if plot:
+        # self.visualize_simple_results(image_data, isolist, good_mask,
+        #                              target_radii_kpc, result, kpc_per_pixel,
+        #                              apply_smoothing, smoothing_kpc)
 
-            if closest_sma is not None:
-                target_isophotes[mult] = closest_sma
-
-        # Draw ellipses for all good isophotes
-        for i, (sma_pix, iso) in enumerate(good_isophotes.items()):
-            # Special color for target isophotes
-            is_target = False
-            for mult, target_sma in target_isophotes.items():
-                if sma_pix == target_sma:
-                    is_target = True
-                    color = 'red' if mult == 2.0 else 'green' if mult == 3.0 else 'blue'
-                    label = f"{mult}×Reff"
-                    linewidth = 2
-                    break
-
-            if not is_target:
-                color = colors[i % len(colors)]
-                label = None
-                linewidth = 1
-
-            # Convert position angle to degrees for ellipse plotting
-            angle_deg = np.degrees(iso['pa'])
-
-            # Semi-minor axis
-            b = sma_pix * (1 - iso['eps'])
-
-            # Draw ellipse
-            ell = MplEllipse((iso['x0'], iso['y0']),
-                             width=2 * sma_pix, height=2 * b,
-                             angle=angle_deg,
-                             edgecolor=color, facecolor='none', linewidth=linewidth,
-                             label=label if label else None)
-            plt.gca().add_patch(ell)
-
-        # Add a legend for target isophotes
-        handles, labels = plt.gca().get_legend_handles_labels()
-        if handles:
-            plt.legend(handles, labels, loc='upper right')
-
-        plt.title('All Good Isophotes')
-        plt.colorbar(label='Intensity')
-
-        # Plot ellipticity vs. semi-major axis
-        plt.subplot(2, 3, 2)
-        smas = np.array([iso['sma_kpc'] for iso in good_isophotes.values()])
-        eps = np.array([iso['eps'] for iso in good_isophotes.values()])
-
-        # Sort by SMA
-        sort_idx = np.argsort(smas)
-        smas = smas[sort_idx]
-        eps = eps[sort_idx]
-
-        plt.plot(smas, eps, 'o-')
-
-        # Mark target radii
-        for mult, target_kpc in target_radii.items():
-            if mult in target_isophotes:
-                target_idx = np.where(smas == good_isophotes[target_isophotes[mult]]['sma_kpc'])[0]
-                if len(target_idx) > 0:
-                    color = 'red' if mult == 2.0 else 'green' if mult == 3.0 else 'blue'
-                    plt.plot(smas[target_idx], eps[target_idx], 'o', color=color,
-                             markersize=10, label=f"{mult}×Reff")
-
-        plt.xlabel('Semi-major axis (kpc)')
-        plt.ylabel('Ellipticity')
-        plt.title('Ellipticity vs. Semi-major axis')
-        plt.legend()
-        plt.grid(True)
-
-        # Plot position angle vs. semi-major axis
-        plt.subplot(2, 3, 3)
-        pas = np.array([iso['pa'] for iso in good_isophotes.values()])[sort_idx]
-
-        # Convert to degrees
-        pas_deg = np.degrees(pas) % 180
-
-        plt.plot(smas, pas_deg, 'o-')
-
-        # Mark target radii
-        for mult, target_kpc in target_radii.items():
-            if mult in target_isophotes:
-                target_idx = np.where(smas == good_isophotes[target_isophotes[mult]]['sma_kpc'])[0]
-                if len(target_idx) > 0:
-                    color = 'red' if mult == 2.0 else 'green' if mult == 3.0 else 'blue'
-                    plt.plot(smas[target_idx], pas_deg[target_idx], 'o', color=color,
-                             markersize=10, label=f"{mult}×Reff")
-
-        plt.xlabel('Semi-major axis (kpc)')
-        plt.ylabel('Position Angle (degrees)')
-        plt.title('Position Angle vs. Semi-major axis')
-        plt.legend()
-        plt.grid(True)
-
-        # Plot gradient error vs. semi-major axis
-        plt.subplot(2, 3, 4)
-        errors = np.array([iso['grad_error'] for iso in good_isophotes.values()])[sort_idx]
-
-        plt.plot(smas, errors, 'o-')
-        plt.axhline(y=0.1, color='r', linestyle='--', label='Error threshold')
-
-        # Mark target radii
-        for mult, target_kpc in target_radii.items():
-            if mult in target_isophotes:
-                target_idx = np.where(smas == good_isophotes[target_isophotes[mult]]['sma_kpc'])[0]
-                if len(target_idx) > 0:
-                    color = 'red' if mult == 2.0 else 'green' if mult == 3.0 else 'blue'
-                    plt.plot(smas[target_idx], errors[target_idx], 'o', color=color,
-                             markersize=10, label=f"{mult}×Reff")
-
-        plt.xlabel('Semi-major axis (kpc)')
-        plt.ylabel('Gradient Error')
-        plt.title('Gradient Error vs. Semi-major axis')
-        plt.legend()
-        plt.grid(True)
-        plt.yscale('log')
-
-        # Plot center x and y vs. semi-major axis
-        plt.subplot(2, 3, 5)
-        x0s = np.array([iso['x0'] for iso in good_isophotes.values()])[sort_idx]
-        y0s = np.array([iso['y0'] for iso in good_isophotes.values()])[sort_idx]
-
-        plt.plot(smas, x0s, 'o-', label='x0')
-        plt.plot(smas, y0s, 'o-', label='y0')
-
-        plt.xlabel('Semi-major axis (kpc)')
-        plt.ylabel('Center position (pixels)')
-        plt.title('Ellipse Center vs. Semi-major axis')
-        plt.legend()
-        plt.grid(True)
-
-        # Plot progress of fitting
-        plt.subplot(2, 3, 6)
-
-        # For each fitting step, plot the resulting isophotes
-        markers = ['o', 's', '^', 'D']
-
-        for i, result in enumerate(all_fitting_results):
-            isolist = result['isolist']
-            step_factor = result['step_factor']
-
-            if len(isolist.sma) > 0:
-                smas_kpc = isolist.sma * kpc_per_pixel
-                errors = isolist.grad_r_error
-
-                plt.plot(smas_kpc, errors, markers[i % len(markers)], alpha=0.7,
-                         label=f"Step {step_factor}", zorder=10 - i)
-
-        plt.axhline(y=0.1, color='r', linestyle='--', label='Error threshold')
-        plt.xlabel('Semi-major axis (kpc)')
-        plt.ylabel('Gradient Error')
-        plt.title('Fitting Progress')
-        plt.legend()
-        plt.grid(True)
-        plt.yscale('log')
-
-        plt.tight_layout()
-        plt.show()
+        return result, all(targets_met.values())
 
     def get_isophote(self, existing_properties):
         """
         Fit elliptical isophotes to galaxy images using moment-based initialization.
 
         Args:
-            existing_properties: Dictionary containing required properties:
-                - 'halo_images': List of image data arrays
-                - 'image_reffs': Effective radii for each image (in kpc)
-                - 'image_orientations': List of orientation angles
-                - 'Rhalf': Half-light radius used for scaling (in pixels)
+            existing_properties: Dictionary containing required properties based on image_type
 
         Returns:
             List of isophote parameters for each orientation
         """
-        images = existing_properties['halo_images'][0:2]
-        reff_values = existing_properties['image_reffs'][0:2]
-        orientations = existing_properties['image_orientations'][0:2]
-        Rhalf = existing_properties['Rhalf']
+        print(f'\tGenerating isophotes for {self.image_type}...\n')
+        # Check that all required properties exist
+        self.check_properties_exist(existing_properties)
+
+        # Get the property mappings for this image type
+        mapping = self.property_mappings[self.image_type]
+
+        # Extract the required properties using the mappings
+        images = existing_properties[mapping['images']]
+        reff_values = existing_properties[mapping['reffs']]
+        orientations = existing_properties[mapping['orientations']]
+        Rhalf = existing_properties[mapping['rhalf']]
 
         # Step size factors ordered from largest to smallest
         step_size_factors = [1.0, 0.5, 0.25, 0.125]
 
         # Calculate kpc per pixel scale
         kpc_per_pixel = (9 * Rhalf) / images[0].shape[0]
-        #logger.info(f"kpc_per_pixel scale: {kpc_per_pixel:.4f}")
+        # logger.info(f"kpc_per_pixel scale: {kpc_per_pixel:.4f}")
 
         # Check if we should use parallel processing
-        n_cores = min(40, len(images))  # Use at most 40 cores or number of images
+        n_cores = min(40, len(images))  # Use at most 40 cores or number of images (should always be 72, unless we are testing
         n_cores = 1
-
 
         params = pymp.shared.dict()
         prog = pymp.shared.array((1,), dtype=int)
         prog[0] = 0
-
 
         # Precompute initial estimates to avoid recalculation in parallel processing
         initial_params = []
@@ -1462,8 +1275,7 @@ class IsophoteAnalysis(LivePropertyCalculation):
                 traceback.print_exc()
                 raise
 
-
-        print(f'\tGenerating images: {round(prog[0] / len(images) * 100, 2)}%')
+        print(f'\tGenerating isophotes for {self.image_type}: {round(prog[0] / len(images) * 100, 2)}%')
         with pymp.Parallel(n_cores) as p:
             for k in p.range(0, len(images)):
                 try:
@@ -1476,10 +1288,10 @@ class IsophoteAnalysis(LivePropertyCalculation):
                     center = (center_x, center_y)
 
                     # Fit isophotes with iterative refinement
-                    param_i, all_targets_met = self.fit_single_image(image_data,radius,step_size_factors,
-                                                    center, initial_eps, initial_pa,radius_factor,
-                                                    kpc_per_pixel, plot=self.visualization_enabled and k == 39)
-
+                    param_i, all_targets_met = self.fit_single_image(image_data, radius, step_size_factors,
+                                                                     center, initial_eps, initial_pa, radius_factor,
+                                                                     kpc_per_pixel,
+                                                                     plot=self.visualization_enabled and k == 39)
 
                     # Log success or warning
                     # if all_targets_met:
@@ -1496,13 +1308,10 @@ class IsophoteAnalysis(LivePropertyCalculation):
                 with p.lock:
                     params[orientation] = param_i
                 prog[0] += 1
-                myprint(f'\tGenerating images: {round(prog[0] / (len(images)) * 100, 2)}%',
+                myprint(f'\tGenerating isophotes for {self.image_type}: {round(prog[0] / (len(images)) * 100, 2)}%',
                         clear=True)
 
-
-
         params_dict = dict(params)
-
 
         # Sort by orientation
         params_sorted = dict(sorted(params_dict.items()))
@@ -1512,16 +1321,814 @@ class IsophoteAnalysis(LivePropertyCalculation):
 
         return isophote_parameters
 
-
-
     def live_calculate(self, existing_properties):
-        """Entry point for analysis"""
-        logger.info("Starting IsophoteAnalysis")
+        """Main calculation method required by tangos"""
+        print(f'Calculating isophotes for {self.image_type}...')
+        logger.info(f'Calculating isophotes for {self.image_type}...')
+        return self.get_isophote(existing_properties)
 
-        # Process images and get parameters
-        isophote_parameters = self.get_isophote(existing_properties)
 
-        return isophote_parameters
+# Convenience subclasses for common use cases
+
+class VBandIsophoteAnalysis(IsophoteAnalysis):
+    """V-band isophote analysis (default)"""
+    names = 'isophote_parameters_v_stars'
+
+    def requires_property(self):
+        return  ['halo_images_v','image_reffs_v', 'image_orientations_v', 'Rhalf_v']
+
+    def __init__(self, simulation):
+        super().__init__(simulation, image_type='v_stars')
+
+
+class UBandIsophoteAnalysis(IsophoteAnalysis):
+    """U-band isophote analysis"""
+    names = 'isophote_parameters_u_stars'
+
+    def requires_property(self):
+        return  ['halo_images_u','image_reffs_u', 'image_orientations_u', 'Rhalf_u']
+
+    def __init__(self, simulation):
+        super().__init__(simulation, image_type='u_stars')
+
+
+class IBandIsophoteAnalysis(IsophoteAnalysis):
+    """I-band isophote analysis"""
+    names = 'isophote_parameters_i_stars'
+
+    def requires_property(self):
+        return  ['halo_images_i','image_reffs_i', 'image_orientations_i', 'Rhalf_i']
+
+    def __init__(self, simulation):
+        super().__init__(simulation, image_type='i_stars')
+
+
+class StellarMassIsophoteAnalysis(IsophoteAnalysis):
+    """Stellar mass density isophote analysis"""
+    names = 'isophote_parameters_rho_stars'
+
+    def requires_property(self):
+        return ['halo_images_rho_stars', 'image_reffs_rho_stars', 'image_orientations_rho_stars', 'Rhalf_rho_stars']
+
+    def __init__(self, simulation):
+        super().__init__(simulation, image_type='rho_stars')
+
+
+class DarkMatterIsophoteAnalysis(IsophoteAnalysis):
+    """Dark matter density isophote analysis"""
+    names = 'isophote_parameters_rho_dm'
+    def requires_property(self):
+        return ['halo_images_rho_dm', 'image_reffs_rho_dm', 'image_orientations_rho_dm', 'Rhalf_rho_dm']
+
+    def __init__(self, simulation):
+        super().__init__(simulation, image_type='rho_dm')
+
+
+class GasIsophoteAnalysis(IsophoteAnalysis):
+    """Gas density isophote analysis"""
+    names = 'isophote_parameters_rho_gas'
+    def requires_property(self):
+        return ['halo_images_rho_gas', 'image_reffs_rho_gas', 'image_orientations_rho_gas', 'Rhalf_rho_gas']
+
+    def __init__(self, simulation):
+        super().__init__(simulation, image_type='rho_gas')
+
+# class IsophoteAnalysis(LivePropertyCalculation):
+#     """Analyzes isophotes to measure projected galaxy shapes at different radii.
+#
+#     For each projection, we measure ellipticity and position angle at 2-4 Reff
+#     to track how galaxy shape varies with radius.
+#     """
+#     names = 'isophote_parameters'
+#
+#     def requires_property(self):
+#         return ['halo_images', 'image_reffs', 'image_orientations', 'Rhalf']
+#
+#     def __init__(self, simulation):
+#         super().__init__(simulation)
+#         self.visualization_enabled = False  # Set to True to enable visualizations
+#
+#     def estimate_initial_params(self, image, reff, kpc_per_pixel, plot=False):
+#         """Estimate ellipse parameters using image moments with visualization"""
+#         #logger.info("Estimating initial parameters from image moments")
+#
+#         # Threshold image to separate galaxy from background
+#         threshold = np.median(image)
+#
+#         # get binary image of values near the threshold
+#         binary_image = np.where((image > 5*threshold) & (image <20*threshold), 1, 0)
+#
+#         # Show the original image
+#         if plot:
+#             plt.figure(figsize=(12, 10))
+#             plt.subplot(2, 2, 1)
+#             plt.imshow(np.log10(image), origin='lower', cmap='viridis', vmin=-3)
+#             plt.colorbar(label='Intensity')
+#             plt.title('Original Image')
+#
+#             plt.subplot(2, 2, 2)
+#             plt.imshow(binary_image, origin='lower', cmap='gray')
+#             plt.title(f'Thresholded Image (threshold={threshold:.2f})')
+#
+#
+#         # Calculate moments
+#         m = moments(binary_image)
+#         #logger.info(f"Zero-order moment (total mass): {m[0, 0]}")
+#
+#         if m[0, 0] == 0:  # No pixels above threshold
+#             logger.warning("No pixels above threshold, using image center")
+#             return image.shape[0] / 2, image.shape[1] / 2, 0.1, 0, 3.0
+#
+#         # Calculate centroid
+#         #centroid_y, centroid_x = m[1, 0] / m[0, 0], m[0, 1] / m[0, 0]
+#         #set centroid to be center of image
+#         centroid_y, centroid_x = image.shape[0] / 2, image.shape[1] / 2
+#         #logger.info(f"Centroid: x={centroid_x:.2f}, y={centroid_y:.2f}")
+#
+#         # Central moments for shape estimation
+#         mu = moments_central(binary_image, (centroid_y, centroid_x))
+#
+#         # Covariance matrix
+#         cov = np.array([[mu[2, 0], mu[1, 1]], [mu[1, 1], mu[0, 2]]]) / mu[0, 0]
+#         #logger.info(f"Covariance matrix:\n{cov}")
+#
+#         # Eigenvalues give us axis lengths
+#         evals, evecs = np.linalg.eig(cov)
+#         #logger.info(f"Eigenvalues: {evals}")
+#         #logger.info(f"Eigenvectors:\n{evecs}")
+#
+#         # Check for negative eigenvalues (numerical instability)
+#         if np.any(evals <= 0):
+#             logger.warning("Negative eigenvalues detected, using default values")
+#             return centroid_x, centroid_y, 0.1, 0, 3.0
+#
+#         a = np.sqrt(evals[0])  # Major axis
+#         b = np.sqrt(evals[1])  # Minor axis
+#
+#         # compute angle
+#         #logger.info(f"Vector for angle calculation: y={evecs[0, 0]}, x={evecs[0, 1]}")
+#         angle = np.arctan2(evecs[0, 0], evecs[0, 1])
+#         # check that a > b
+#         if a < b:
+#             #logger.warning("Major axis is smaller than minor axis, swapping values")
+#             a, b = b, a
+#             # rotate angle by 90 degrees
+#             angle += np.pi / 2
+#
+#         #logger.info(f"Major axis: {a:.2f}, Minor axis: {b:.2f}")
+#
+#         # Ellipticity and position angle
+#         eps = 1.0 - (b / a)
+#         eps = min(0.85, max(0.01, eps))  # Constrain ellipticity
+#         #logger.info(f"Initial ellipticity: {eps:.2f}")
+#         #logger.info(f"Initial position angle: {angle:.2f} radians")
+#
+#         # Estimate a good starting radius from moments
+#         estimated_radius = np.sqrt(np.mean([mu[2, 0], mu[0, 2]]) / mu[0, 0])
+#         # Convert to a factor of the effective radius
+#         radius_factor = estimated_radius / (reff / kpc_per_pixel)
+#         # Constrain to reasonable values
+#         radius_factor = min(4.5, max(2.5, radius_factor))
+#         #logger.info(f"Estimated radius: {estimated_radius:.2f} pixels")
+#         #logger.info(f"Radius factor (x Reff): {radius_factor:.2f}")
+#
+#         # Visualize the estimated ellipse
+#         if plot:
+#             plt.subplot(2, 2, 3)
+#             plt.imshow(np.log10(image), origin='lower', cmap='viridis', vmin=-3)
+#
+#             # Convert position angle to degrees for ellipse plotting
+#             angle_deg = np.degrees(angle)
+#
+#             # Draw ellipse
+#             from matplotlib.patches import Ellipse as MplEllipse
+#             ell = MplEllipse((centroid_x, centroid_y),
+#                              width=2 * a, height=2 * b,
+#                              angle=angle_deg,
+#                              edgecolor='red', facecolor='none', linewidth=2)
+#             plt.gca().add_patch(ell)
+#
+#             # Draw axes
+#             plt.plot([centroid_x, centroid_x + a * np.cos(angle)],
+#                      [centroid_y, centroid_y + a * np.sin(angle)],
+#                      'r-', linewidth=1)
+#             plt.plot([centroid_x, centroid_x + b * np.cos(angle + np.pi / 2)],
+#                      [centroid_y, centroid_y + b * np.sin(angle + np.pi / 2)],
+#                      'r-', linewidth=1)
+#
+#             plt.title(f'Estimated Ellipse (e={eps:.2f}, PA={angle_deg:.2f}°)')
+#             plt.tight_layout()
+#             plt.show()
+#
+#         return centroid_x, centroid_y, eps, angle, radius_factor
+#
+#     def fit_single_image(self, image_data, radius, step_size_factors, center, eps, pa, sma_factor,
+#                          kpc_per_pixel, plot=False):
+#         """Fit ellipse with moment-based parameters and return results with visualization"""
+#         #logger.info("Starting isophote fitting")
+#         #logger.info(f"Effective radius: {radius:.2f} kpc")
+#         #logger.info(f"Scale: {kpc_per_pixel:.4f} kpc/pixel")
+#         #logger.info(f"Initial parameters: center={center}, eps={eps:.2f}, pa={pa:.2f}, sma_factor={sma_factor:.2f}")
+#
+#         radius_pixels = radius / kpc_per_pixel
+#         #logger.info(f"Effective radius: {radius_pixels:.2f} pixels")
+#
+#         # Track good isophotes
+#         good_isophotes = {}  # Will store successful fits indexed by sma in pixels
+#
+#         # Track which target radii (2, 3, 4 * Reff) have been successfully measured
+#         target_multipliers = [2.0, 3.0, 4.0]
+#         target_radii = {mult: mult * radius for mult in target_multipliers}
+#         target_radii_met = {mult: False for mult in target_multipliers}
+#
+#         #logger.info(f"Target radii: {target_radii}")
+#
+#         # Initial ellipse geometry with original guess
+#         geometry = EllipseGeometry(
+#             x0=center[0], y0=center[1],
+#             sma=sma_factor * radius_pixels,
+#             eps=eps,
+#             pa=pa
+#         )
+#         #logger.info(f"Initial geometry: {geometry}")
+#
+#         # Start with the full range
+#         min_sma = 0.75 * radius_pixels
+#         max_sma = 4.5 * radius_pixels
+#         #logger.info(f"SMA range: {min_sma:.2f} to {max_sma:.2f} pixels")
+#
+#         # Base step size
+#         base_step = 1/8
+#
+#         all_fitting_results = []  # Store results from each step size for visualization
+#
+#         # Try progressively smaller step sizes until we get good fits at all target radii
+#         for step_idx, step_factor in enumerate(step_size_factors):
+#             step = base_step * radius_pixels * step_factor
+#             #logger.info(f"\n--- Using step size factor {step_factor} (step={step:.2f} pixels) ---")
+#
+#             # Check if we've already met all targets
+#             if all(target_radii_met.values()):
+#                 #logger.info("All target radii have been met, breaking loop")
+#                 break
+#
+#             # Calculate which ranges we still need to fit
+#             # Convert good_isophotes keys to kpc for comparison with target_radii
+#             good_smas_kpc = np.array([sma * kpc_per_pixel for sma in good_isophotes.keys()])
+#
+#             # Determine remaining ranges to fit
+#             ranges_to_fit = []
+#
+#             if not good_smas_kpc.size:
+#                 # No good fits yet, fit the full range
+#                 ranges_to_fit.append((min_sma, max_sma))
+#                 #logger.info("No good fits yet, fitting full range")
+#             else:
+#                 # Check which target radii haven't been met
+#                 for mult in target_multipliers:
+#                     if not target_radii_met[mult]:
+#                         target = target_radii[mult]
+#                         # Find closest good fits below and above the target
+#                         below_idx = np.where(good_smas_kpc < target)[0]
+#                         above_idx = np.where(good_smas_kpc > target)[0]
+#
+#                         below_sma = good_smas_kpc[below_idx[-1]] / kpc_per_pixel if below_idx.size else min_sma
+#                         above_sma = good_smas_kpc[above_idx[0]] / kpc_per_pixel if above_idx.size else max_sma
+#
+#                         # Only add range if there's a significant gap
+#                         gap_threshold = 0.2 * radius_pixels
+#                         if above_sma - below_sma > gap_threshold:
+#                             ranges_to_fit.append((below_sma, above_sma))
+#                             #logger.info(
+#                                 #f"Adding range: {below_sma:.2f} to {above_sma:.2f} pixels for target {mult}×Reff")
+#
+#             # If no more ranges to fit, break
+#             if not ranges_to_fit:
+#                 #logger.info("No more ranges to fit, breaking loop")
+#                 break
+#
+#             # Fit each remaining range
+#             for range_idx, (range_min, range_max) in enumerate(ranges_to_fit):
+#                 #logger.info(
+#                     #f"Fitting range {range_idx + 1}/{len(ranges_to_fit)}: {range_min:.2f} to {range_max:.2f} pixels")
+#
+#                 # Get the closest good isophote to use as a starting point
+#                 if good_isophotes:
+#                     # Find closest good isophote to the midpoint of our range
+#                     midpoint = (range_min + range_max) / 2
+#                     closest_sma = min(good_isophotes.keys(), key=lambda x: abs(x - midpoint))
+#                     closest_iso = good_isophotes[closest_sma]
+#
+#                     #logger.info(f"Using closest good isophote at SMA={closest_sma:.2f} pixels as starting point")
+#
+#                     # Update geometry with values from the closest good isophote
+#                     geometry = EllipseGeometry(
+#                         x0=closest_iso['x0'],
+#                         y0=closest_iso['y0'],
+#                         sma=closest_sma,
+#                         eps=closest_iso['eps'],
+#                         pa=closest_iso['pa']
+#                     )
+#                     #logger.info(f"Updated geometry: {geometry}")
+#
+#                 # Fit ellipses for this range
+#                 #logger.info(f"Fitting with SMA range: {range_min:.2f} to {range_max:.2f} pixels")
+#
+#                 try:
+#                     ellipse = Ellipse(image_data, geometry)
+#                     isolist = ellipse.fit_image(
+#                         minsma=range_min,
+#                         maxsma=range_max,
+#                         sma0=geometry.sma,
+#                         linear=True,
+#                         step=step,
+#                         maxit=100,
+#                         minit=20,
+#                         fix_center=False,
+#                         fix_eps=False,
+#                         fix_pa=False,
+#                         sclip=2.5,
+#                         nclip=3
+#                     )
+#
+#                     # Store this fitting result for visualization
+#                     all_fitting_results.append({
+#                         'step_factor': step_factor,
+#                         'range': (range_min, range_max),
+#                         'isolist': isolist
+#                     })
+#
+#                     # Check if we got any valid isophotes
+#                     if len(isolist.sma) == 0:
+#                         #logger.info("No valid isophotes found in this range")
+#                         #if it's the first step, let's retry our initial guess with a larger radius
+#                         if step_factor == step_size_factors[0]:
+#                             sma = geometry.sma
+#                             for r_factor in [1.5,0.75,2.0,0.5,3.0,0.25]:
+#                                 try:
+#                                     #logger.info("Trying initial guess with radius factor: {}".format(r_factor))
+#                                     ellipse = Ellipse(image_data, geometry)
+#                                     range_min = 2.5 * radius_pixels
+#                                     range_max = 4.5 * radius_pixels
+#                                     #ensure the range includes sma*r_factor
+#                                     range_min = min(range_min, sma * r_factor)
+#                                     range_max = max(range_max, sma * r_factor)
+#
+#                                     isolist = ellipse.fit_image(
+#                                         minsma=range_min,
+#                                         maxsma=range_max,
+#                                         sma0=sma * r_factor,
+#                                         linear=True,
+#                                         step=step,
+#                                         maxit=100,
+#                                         minit=20,
+#                                         fix_center=False,
+#                                         fix_eps=False,
+#                                         fix_pa=False,
+#                                     )
+#                                 except Exception as e:
+#                                     #logger.error(f"Error during fitting with radius factor {r_factor}: {e}")
+#                                     continue
+#                                 if len(isolist.sma) > 0:
+#                                     #logger.info(f'Found valid isophotes with radius factor: {r_factor}')
+#                                     break
+#
+#                             #logger.info(f"Found {len(isolist.sma)} isophotes with larger radius")
+#
+#                     #logger.info(f"Found {len(isolist.sma)} isophotes")
+#
+#                     # Extract data and add good isophotes to our collection
+#                     smas_kpc = isolist.sma * kpc_per_pixel
+#
+#                     for i in range(len(isolist.sma)):
+#                         sma_pixels = isolist.sma[i]
+#                         sma_kpc = smas_kpc[i]
+#
+#                         # Only consider good fits (gradient error below threshold)
+#                         if isolist.grad_r_error[i] < 0.1:
+#                             # Store the good isophote if it's better than what we have or if we don't have it
+#                             if sma_pixels not in good_isophotes or isolist.grad_r_error[i] < good_isophotes[sma_pixels][
+#                                 'grad_error']:
+#                                 good_isophotes[sma_pixels] = {
+#                                     'sma': sma_pixels,
+#                                     'sma_kpc': sma_kpc,
+#                                     'eps': isolist.eps[i],
+#                                     'pa': isolist.pa[i],
+#                                     'x0': isolist.x0[i],
+#                                     'y0': isolist.y0[i],
+#                                     'grad_error': isolist.grad_r_error[i],
+#                                     'intens': isolist.intens[i],
+#                                     'rms': isolist.rms[i]
+#                                 }
+#
+#                                 #logger.info(f"Found good isophote at SMA={sma_pixels:.2f} pixels ({sma_kpc:.2f} kpc)")
+#                                 #logger.info(
+#                                     #f"  e={isolist.eps[i]:.2f}, PA={isolist.pa[i]:.2f}, grad_err={isolist.grad_r_error[i]:.4f}")
+#
+#                             # Check if this isophote satisfies any of our target radii
+#                             for mult in target_multipliers:
+#                                 target = target_radii[mult]
+#                                 # Allow a small tolerance (5%)
+#                                 if abs(sma_kpc - target) < 0.05 * target:
+#                                     #if not target_radii_met[mult]:
+#                                         #logger.info(
+#                                             #f"Target {mult}×Reff ({target:.2f} kpc) met with isophote at {sma_kpc:.2f} kpc")
+#                                     target_radii_met[mult] = True
+#
+#                 except Exception as e:
+#                     logger.error(f"Error during fitting: {e}")
+#                     traceback.print_exc()
+#
+#         # Log which targets were met
+#         # for mult in target_multipliers:
+#         #     status = "✓" if target_radii_met[mult] else "✗"
+#         #     logger.info(f"Target {mult}×Reff: {status}")
+#
+#         if not all(target_radii_met.values()):
+#             # logger.info("\n--- Relaxing gradient error threshold to fill missing target radii ---")
+#             i = 0
+#             relaxed_threshold = 0.1
+#
+#             # Starting from slightly above our initial threshold, gradually increase up to a maximum
+#             while not all(target_radii_met.values()):
+#                 i = i + 1
+#                 relaxed_threshold *= 1.2  # Increase threshold by 20% each iteration
+#                 # Ensure this doesn't repeat too many times
+#                 if i > 50:
+#                     logger.warning("Relaxed threshold exceeded maximum iterations, stopping.")
+#                     break
+#                 # logger.info(f"Trying relaxed threshold: {relaxed_threshold:.2f}")
+#
+#                 # Go through all our previous fitting results with the relaxed threshold
+#                 for result in all_fitting_results:
+#                     isolist = result['isolist']
+#
+#                     # Skip if no isophotes were found in this result
+#                     if len(isolist.sma) == 0:
+#                         continue
+#
+#                     smas_kpc = isolist.sma * kpc_per_pixel
+#
+#                     for i in range(len(isolist.sma)):
+#                         sma_pixels = isolist.sma[i]
+#                         sma_kpc = smas_kpc[i]
+#
+#                         # Apply relaxed threshold
+#                         if isolist.grad_r_error[i] < relaxed_threshold:
+#                             # Only add if this is better than what we have or we don't have it
+#                             if (sma_pixels not in good_isophotes or
+#                                     isolist.grad_r_error[i] < good_isophotes[sma_pixels]['grad_error']):
+#                                 good_isophotes[sma_pixels] = {
+#                                     'sma': sma_pixels,
+#                                     'sma_kpc': sma_kpc,
+#                                     'eps': isolist.eps[i],
+#                                     'pa': isolist.pa[i],
+#                                     'x0': isolist.x0[i],
+#                                     'y0': isolist.y0[i],
+#                                     'grad_error': isolist.grad_r_error[i],
+#                                     'intens': isolist.intens[i],
+#                                     'rms': isolist.rms[i]
+#                                 }
+#
+#                                 # logger.info(f"With relaxed threshold, found isophote at SMA={sma_pixels:.2f} pixels ({sma_kpc:.2f} kpc)")
+#                                 # logger.info(f"  e={isolist.eps[i]:.2f}, PA={isolist.pa[i]:.2f}, grad_err={isolist.grad_r_error[i]:.4f}")
+#
+#                             # Check if this isophote satisfies any target radii
+#                             for mult in target_multipliers:
+#                                 if not target_radii_met[mult]:
+#                                     target = target_radii[mult]
+#                                     # Allow a small tolerance (5%)
+#                                     if abs(sma_kpc - target) < 0.05 * target:
+#                                         target_radii_met[mult] = True
+#                                         # logger.info(f"Target {mult}×Reff ({target:.2f} kpc) met with relaxed threshold")
+#
+#                 # Check if we've met all targets now
+#                 if all(target_radii_met.values()):
+#                     # logger.info(f"All target radii met with relaxed threshold {relaxed_threshold:.2f}")
+#                     break
+#
+#         # Convert our dictionary of good isophotes to the expected format for return
+#         result = []
+#         for sma in sorted(good_isophotes.keys()):
+#             iso = good_isophotes[sma]
+#             result.append([
+#                 iso['sma'],
+#                 iso['eps'],
+#                 iso['pa'],
+#                 iso['grad_error'],
+#                 iso['x0'],
+#                 iso['y0'],
+#                 iso['intens'],
+#                 iso['rms']
+#             ])
+#
+#         # Visualize the final results if requested
+#         if plot:
+#             self.visualize_results(image_data, good_isophotes, target_radii,
+#                                    all_fitting_results, kpc_per_pixel)
+#
+#         return result, all(target_radii_met.values())
+#
+#     def visualize_results(self, image, good_isophotes, target_radii, all_fitting_results, kpc_per_pixel):
+#         """Visualize the isophote fitting results"""
+#         # Create a figure with multiple subplots
+#         plt.figure(figsize=(18, 12))
+#
+#         # Plot the image with all good isophotes
+#         plt.subplot(2, 3, 1)
+#         plt.imshow(np.log10(image), origin='lower', cmap='viridis', vmin=1)
+#
+#         # Draw all good isophotes
+#         from matplotlib.patches import Ellipse as MplEllipse
+#
+#         # Different colors for different isophotes
+#         colors = plt.cm.tab10(np.linspace(0, 1, len(good_isophotes)))
+#
+#         # Track which isophotes match our target radii
+#         target_isophotes = {}
+#         for mult, target_kpc in target_radii.items():
+#             closest_sma = None
+#             min_diff = float('inf')
+#
+#             for sma_pix, iso in good_isophotes.items():
+#                 sma_kpc = iso['sma_kpc']
+#                 diff = abs(sma_kpc - target_kpc)
+#
+#                 if diff < min_diff and diff < 0.05 * target_kpc:
+#                     min_diff = diff
+#                     closest_sma = sma_pix
+#
+#             if closest_sma is not None:
+#                 target_isophotes[mult] = closest_sma
+#
+#         # Draw ellipses for all good isophotes
+#         for i, (sma_pix, iso) in enumerate(good_isophotes.items()):
+#             # Special color for target isophotes
+#             is_target = False
+#             for mult, target_sma in target_isophotes.items():
+#                 if sma_pix == target_sma:
+#                     is_target = True
+#                     color = 'red' if mult == 2.0 else 'green' if mult == 3.0 else 'blue'
+#                     label = f"{mult}×Reff"
+#                     linewidth = 2
+#                     break
+#
+#             if not is_target:
+#                 color = colors[i % len(colors)]
+#                 label = None
+#                 linewidth = 1
+#
+#             # Convert position angle to degrees for ellipse plotting
+#             angle_deg = np.degrees(iso['pa'])
+#
+#             # Semi-minor axis
+#             b = sma_pix * (1 - iso['eps'])
+#
+#             # Draw ellipse
+#             ell = MplEllipse((iso['x0'], iso['y0']),
+#                              width=2 * sma_pix, height=2 * b,
+#                              angle=angle_deg,
+#                              edgecolor=color, facecolor='none', linewidth=linewidth,
+#                              label=label if label else None)
+#             plt.gca().add_patch(ell)
+#
+#         # Add a legend for target isophotes
+#         handles, labels = plt.gca().get_legend_handles_labels()
+#         if handles:
+#             plt.legend(handles, labels, loc='upper right')
+#
+#         plt.title('All Good Isophotes')
+#         plt.colorbar(label='Intensity')
+#
+#         # Plot ellipticity vs. semi-major axis
+#         plt.subplot(2, 3, 2)
+#         smas = np.array([iso['sma_kpc'] for iso in good_isophotes.values()])
+#         eps = np.array([iso['eps'] for iso in good_isophotes.values()])
+#
+#         # Sort by SMA
+#         sort_idx = np.argsort(smas)
+#         smas = smas[sort_idx]
+#         eps = eps[sort_idx]
+#
+#         plt.plot(smas, eps, 'o-')
+#
+#         # Mark target radii
+#         for mult, target_kpc in target_radii.items():
+#             if mult in target_isophotes:
+#                 target_idx = np.where(smas == good_isophotes[target_isophotes[mult]]['sma_kpc'])[0]
+#                 if len(target_idx) > 0:
+#                     color = 'red' if mult == 2.0 else 'green' if mult == 3.0 else 'blue'
+#                     plt.plot(smas[target_idx], eps[target_idx], 'o', color=color,
+#                              markersize=10, label=f"{mult}×Reff")
+#
+#         plt.xlabel('Semi-major axis (kpc)')
+#         plt.ylabel('Ellipticity')
+#         plt.title('Ellipticity vs. Semi-major axis')
+#         plt.legend()
+#         plt.grid(True)
+#
+#         # Plot position angle vs. semi-major axis
+#         plt.subplot(2, 3, 3)
+#         pas = np.array([iso['pa'] for iso in good_isophotes.values()])[sort_idx]
+#
+#         # Convert to degrees
+#         pas_deg = np.degrees(pas) % 180
+#
+#         plt.plot(smas, pas_deg, 'o-')
+#
+#         # Mark target radii
+#         for mult, target_kpc in target_radii.items():
+#             if mult in target_isophotes:
+#                 target_idx = np.where(smas == good_isophotes[target_isophotes[mult]]['sma_kpc'])[0]
+#                 if len(target_idx) > 0:
+#                     color = 'red' if mult == 2.0 else 'green' if mult == 3.0 else 'blue'
+#                     plt.plot(smas[target_idx], pas_deg[target_idx], 'o', color=color,
+#                              markersize=10, label=f"{mult}×Reff")
+#
+#         plt.xlabel('Semi-major axis (kpc)')
+#         plt.ylabel('Position Angle (degrees)')
+#         plt.title('Position Angle vs. Semi-major axis')
+#         plt.legend()
+#         plt.grid(True)
+#
+#         # Plot gradient error vs. semi-major axis
+#         plt.subplot(2, 3, 4)
+#         errors = np.array([iso['grad_error'] for iso in good_isophotes.values()])[sort_idx]
+#
+#         plt.plot(smas, errors, 'o-')
+#         plt.axhline(y=0.1, color='r', linestyle='--', label='Error threshold')
+#
+#         # Mark target radii
+#         for mult, target_kpc in target_radii.items():
+#             if mult in target_isophotes:
+#                 target_idx = np.where(smas == good_isophotes[target_isophotes[mult]]['sma_kpc'])[0]
+#                 if len(target_idx) > 0:
+#                     color = 'red' if mult == 2.0 else 'green' if mult == 3.0 else 'blue'
+#                     plt.plot(smas[target_idx], errors[target_idx], 'o', color=color,
+#                              markersize=10, label=f"{mult}×Reff")
+#
+#         plt.xlabel('Semi-major axis (kpc)')
+#         plt.ylabel('Gradient Error')
+#         plt.title('Gradient Error vs. Semi-major axis')
+#         plt.legend()
+#         plt.grid(True)
+#         plt.yscale('log')
+#
+#         # Plot center x and y vs. semi-major axis
+#         plt.subplot(2, 3, 5)
+#         x0s = np.array([iso['x0'] for iso in good_isophotes.values()])[sort_idx]
+#         y0s = np.array([iso['y0'] for iso in good_isophotes.values()])[sort_idx]
+#
+#         plt.plot(smas, x0s, 'o-', label='x0')
+#         plt.plot(smas, y0s, 'o-', label='y0')
+#
+#         plt.xlabel('Semi-major axis (kpc)')
+#         plt.ylabel('Center position (pixels)')
+#         plt.title('Ellipse Center vs. Semi-major axis')
+#         plt.legend()
+#         plt.grid(True)
+#
+#         # Plot progress of fitting
+#         plt.subplot(2, 3, 6)
+#
+#         # For each fitting step, plot the resulting isophotes
+#         markers = ['o', 's', '^', 'D']
+#
+#         for i, result in enumerate(all_fitting_results):
+#             isolist = result['isolist']
+#             step_factor = result['step_factor']
+#
+#             if len(isolist.sma) > 0:
+#                 smas_kpc = isolist.sma * kpc_per_pixel
+#                 errors = isolist.grad_r_error
+#
+#                 plt.plot(smas_kpc, errors, markers[i % len(markers)], alpha=0.7,
+#                          label=f"Step {step_factor}", zorder=10 - i)
+#
+#         plt.axhline(y=0.1, color='r', linestyle='--', label='Error threshold')
+#         plt.xlabel('Semi-major axis (kpc)')
+#         plt.ylabel('Gradient Error')
+#         plt.title('Fitting Progress')
+#         plt.legend()
+#         plt.grid(True)
+#         plt.yscale('log')
+#
+#         plt.tight_layout()
+#         plt.show()
+#
+#     def get_isophote(self, existing_properties):
+#         """
+#         Fit elliptical isophotes to galaxy images using moment-based initialization.
+#
+#         Args:
+#             existing_properties: Dictionary containing required properties:
+#                 - 'halo_images': List of image data arrays
+#                 - 'image_reffs': Effective radii for each image (in kpc)
+#                 - 'image_orientations': List of orientation angles
+#                 - 'Rhalf': Half-light radius used for scaling (in pixels)
+#
+#         Returns:
+#             List of isophote parameters for each orientation
+#         """
+#         images = existing_properties['halo_images'][0:2]
+#         reff_values = existing_properties['image_reffs'][0:2]
+#         orientations = existing_properties['image_orientations'][0:2]
+#         Rhalf = existing_properties['Rhalf']
+#
+#         # Step size factors ordered from largest to smallest
+#         step_size_factors = [1.0, 0.5, 0.25, 0.125]
+#
+#         # Calculate kpc per pixel scale
+#         kpc_per_pixel = (9 * Rhalf) / images[0].shape[0]
+#         #logger.info(f"kpc_per_pixel scale: {kpc_per_pixel:.4f}")
+#
+#         # Check if we should use parallel processing
+#         n_cores = min(40, len(images))  # Use at most 40 cores or number of images
+#         n_cores = 1
+#
+#
+#         params = pymp.shared.dict()
+#         prog = pymp.shared.array((1,), dtype=int)
+#         prog[0] = 0
+#
+#
+#         # Precompute initial estimates to avoid recalculation in parallel processing
+#         initial_params = []
+#         for k, img in enumerate(images):
+#             try:
+#                 # Only visualize the first image if visualization is enabled
+#                 plot_this_image = self.visualization_enabled and k == 70
+#
+#                 center_x, center_y, initial_eps, initial_pa, radius_factor = self.estimate_initial_params(
+#                     img, reff_values[k], kpc_per_pixel, plot=plot_this_image)
+#
+#                 initial_params.append((center_x, center_y, initial_eps, initial_pa, radius_factor))
+#
+#             except Exception as e:
+#                 logger.error(f"Error estimating initial parameters for image {k}: {e}")
+#                 traceback.print_exc()
+#                 raise
+#
+#
+#         print(f'\tGenerating images: {round(prog[0] / len(images) * 100, 2)}%')
+#         with pymp.Parallel(n_cores) as p:
+#             for k in p.range(0, len(images)):
+#                 try:
+#                     image_data = images[k]
+#                     radius = reff_values[k]
+#                     orientation = orientations[k]
+#
+#                     # Get precomputed initial parameters
+#                     center_x, center_y, initial_eps, initial_pa, radius_factor = initial_params[k]
+#                     center = (center_x, center_y)
+#
+#                     # Fit isophotes with iterative refinement
+#                     param_i, all_targets_met = self.fit_single_image(image_data,radius,step_size_factors,
+#                                                     center, initial_eps, initial_pa,radius_factor,
+#                                                     kpc_per_pixel, plot=self.visualization_enabled and k == 39)
+#
+#
+#                     # Log success or warning
+#                     # if all_targets_met:
+#                     #     logger.info(f"Successfully fit all target radii for orientation {orientation}")
+#                     # else:
+#                     #     logger.warning(f"Could not fit all target radii for orientation {orientation}")
+#
+#                 except Exception as e:
+#                     print(f'Error in orientation {orientation}: {e}')
+#                     traceback.print_exc()
+#                     logger.error(f'Error in orientation {orientation}: {e}')
+#                     raise
+#
+#                 with p.lock:
+#                     params[orientation] = param_i
+#                 prog[0] += 1
+#                 myprint(f'\tGenerating images: {round(prog[0] / (len(images)) * 100, 2)}%',
+#                         clear=True)
+#
+#
+#
+#         params_dict = dict(params)
+#
+#
+#         # Sort by orientation
+#         params_sorted = dict(sorted(params_dict.items()))
+#
+#         # Unpack results from sorted dictionary
+#         isophote_parameters = [params_sorted[key] for key in params_sorted]
+#
+#         return isophote_parameters
+#
+#
+#
+#     def live_calculate(self, existing_properties):
+#         """Entry point for analysis"""
+#         logger.info("Starting IsophoteAnalysis")
+#
+#         # Process images and get parameters
+#         isophote_parameters = self.get_isophote(existing_properties)
+#
+#         return isophote_parameters
 
 
 
@@ -1633,104 +2240,6 @@ class r_80(PynbodyPropertyCalculation):
 #     def plot_xvalues(self,for_data):
 #         # need someway to find out if this is the stellar or dark matter profile and return the correct rbins
 #         return
-
-
-from tangos.properties.pynbody import PynbodyPropertyCalculation
-import numpy as np
-import pynbody
-
-
-class StarFormationProfile(PynbodyPropertyCalculation):
-    """
-    Calculate star formation rate profile and edge radius for a halo.
-
-    This class computes two key properties related to star formation in a halo:
-
-    1. R_edge: The radius at which star formation effectively ceases, defined as the
-       smallest radius where the normalized star formation rate (s_sfr) drops to
-       zero or below. This represents the "edge" of active star formation.
-
-    2. s_sfr_profile: The normalized star formation rate profile, calculated as the
-       ratio of newly formed stellar mass to total stellar mass in radial bins.
-       This profile shows how star formation efficiency varies with radius.
-
-    The calculation:
-    - Orients the halo face-on for consistent radial measurements
-    - Identifies newly formed stars within a specified lookback time (default 100 Myr)
-    - Creates radial profiles for both newly formed and total stellar mass
-    - Computes the normalized star formation rate (s_sfr) as their ratio
-    - Determines R_edge as the first radius where star formation ceases
-
-    Attributes:
-        lookback_time (float): Time period in Myr to define "newly formed" stars.
-                              Default is 100 Myr.
-
-    Example:
-        # Use default 100 Myr lookback time
-        calculator = StarFormationProfile()
-
-        # Use custom 50 Myr lookback time
-        calculator = StarFormationProfile(lookback_time=50.0)
-
-        # Use custom 200 Myr lookback time
-        calculator = StarFormationProfile(lookback_time=200.0)
-    """
-    names = ["R_edge", "s_sfr_profile"]
-
-    def __init__(self, lookback_time=100.0):
-        """
-        Initialize the StarFormationProfile calculator.
-
-        Parameters:
-            lookback_time (float): Time period in Myr to consider stars as
-                                  "newly formed". Default is 100 Myr.
-        """
-        super().__init__()
-        self.lookback_time = lookback_time
-
-    def calculate(self, particle_data, existing_properties):
-        """
-        Calculate the star formation profile and edge radius.
-
-        Returns:
-            tuple: (R_edge, s_sfr_profile) where:
-                - R_edge: Radius where star formation ceases (float)
-                - s_sfr_profile: Normalized star formation rate vs radius (array)
-        """
-        halo = particle_data
-
-        # Set physical units and orient face-on for consistent radial measurements
-        halo.physical_units()
-        pynbody.analysis.angmom.faceon(halo)
-
-        # Find newly formed stars in the specified lookback time
-        newly_formed_stars = halo.s[halo.s['tform'] > (halo.s['tform'].max() - self.lookback_time * pynbody.units.Myr)]
-
-        # Create profiles
-        prof_sfr = pynbody.analysis.profile.Profile(newly_formed_stars, type='lin', min=0.1,
-                                                    max=halo.s['r'].max(), ndim=2,
-                                                    nbins=int((5 * halo.s['r'].max()) / 0.1))
-
-        prof = pynbody.analysis.profile.Profile(halo.s, type='lin', min=0.1,
-                                                max=halo.s['r'].max(), ndim=2,
-                                                nbins=int((5 * halo.s['r'].max()) / 0.1))
-
-        # Calculate s_sfr (star formation rate profile)
-        s_sfr = prof_sfr['mass'] / prof['mass']
-
-        # Calculate r_edge as the smallest radius where s_sfr <= 0
-        # Handle case where no bins meet the criteria
-        valid_bins = s_sfr <= 0
-        if np.any(valid_bins):
-            r_edge = np.min(prof_sfr['rbins'][valid_bins])
-        else:
-            r_edge = np.nan  # or some default value
-
-        # Return values in the same order as names
-        return r_edge, s_sfr
-
-
-
 
 class BaseShapeCalculator:
     """
@@ -1874,32 +2383,34 @@ class GasShape(BaseShapeCalculator, PynbodyPropertyCalculation):
 
 
 class SmoothAxisRatio(LivePropertyCalculation):
-    names = ['ba_s_smoothed', 'ca_s_smoothed', 'ba_d_smoothed', 'ca_d_smoothed']
+    names = ['r_s_f', 'ba_s_smoothed', 'ca_s_smoothed', 'r_d_f', 'ba_d_smoothed', 'ca_d_smoothed', 'r_g_f',
+             'ba_g_smoothed', 'ca_g_smoothed']
 
     def requires_property(self):
-        return ['ba_s', 'ba_d', 'ca_s', 'ca_d', 'rbins_s','rbins_d']
+        return ['ba_s', 'ba_d', 'ba_g', 'ca_s', 'ca_d', 'ca_g', 'rbins_s', 'rbins_d', 'rbins_g']
 
     @staticmethod
     def nan_func(x):
         return np.nan
+
     @staticmethod
-    def smooth_shape(rbins, ba, ca, k=4):
+    def smooth_shape(rbins, ba, ca, k=3):
         s_factor = 1
         """
         Smooth and filter data, handling a few NaN values gracefully.
 
         Parameters:
         rbins, ba, ca: array-like, input data
-        k: int, degree of the smoothing spline (default 3)
-        s_factor: float, smoothing factor as a fraction of len(rbins) (default 0.01)
-        residual_threshold, jump_threshold, jump_percentage: unused in this version
+        k: int, degree of the smoothing spline (default 3, recommended cubic)
+        s_factor: float, smoothing factor as a fraction of len(rbins) (default 1)
 
         Returns:
         rbins, ba, ca: filtered arrays
-        ba_s, ca_s: smoothed spline functions
+        ba_s, ca_s: smoothed spline functions (or nan_func if insufficient data)
         """
         import numpy as np
-        from scipy.interpolate import UnivariateSpline
+        from scipy.interpolate import splrep, splev
+        import scipy
 
         # Remove rows where either ba or ca is NaN
         mask = ~np.isnan(ba) & ~np.isnan(ca)
@@ -1907,62 +2418,120 @@ class SmoothAxisRatio(LivePropertyCalculation):
         ba_filtered = ba[mask]
         ca_filtered = ca[mask]
 
+        # Check if we have enough points for any meaningful spline
+        min_points = max(k + 1, 3)  # Need at least k+1 points for degree k spline
+        if len(rbins_filtered) < min_points:
+            return rbins_filtered, ba_filtered, ca_filtered, SmoothAxisRatio.nan_func, SmoothAxisRatio.nan_func
+
         # Calculate smoothing parameter
         s = s_factor * len(rbins_filtered)
 
-        # Create splines
-        ba_s = UnivariateSpline(rbins_filtered, ba_filtered, k=k, s=s)
-        ca_s = UnivariateSpline(rbins_filtered, ca_filtered, k=k, s=s)
+        # Create initial splines with bounded domain
+        xb, xe = rbins_filtered[0], rbins_filtered[-1]
+        ba_s_tck = scipy.interpolate.splrep(rbins_filtered, ba_filtered, k=k, s=s, xb=xb, xe=xe)
+        ca_s_tck = scipy.interpolate.splrep(rbins_filtered, ca_filtered, k=k, s=s, xb=xb, xe=xe)
 
+        # Calculate residuals and remove outliers
+        ba_residuals = ba_filtered - splev(rbins_filtered, ba_s_tck)
+        ca_residuals = ca_filtered - splev(rbins_filtered, ca_s_tck)
 
-
-        n = len(rbins_filtered)
-        # calculate residuals and remove outliers
-        ba_residuals = ba_filtered - ba_s(rbins_filtered)
-        ca_residuals = ca_filtered - ca_s(rbins_filtered)
-        # calculate the standard deviation of the residuals
+        # Calculate the standard deviation of the residuals
         ba_std = np.std(ba_residuals)
         ca_std = np.std(ca_residuals)
-        # remove outliers
-        d = 3
 
+        # Remove outliers
+        d = 5
         mask = np.abs(ba_residuals) < d * ba_std
-
         rbins_filtered = rbins_filtered[mask]
         ba_filtered = ba_filtered[mask]
         ca_filtered = ca_filtered[mask]
+
+        # Check again after outlier removal
+        if len(rbins_filtered) < min_points:
+            return rbins_filtered, ba_filtered, ca_filtered, SmoothAxisRatio.nan_func, SmoothAxisRatio.nan_func
+
         mask = np.abs(ca_residuals[mask]) < d * ca_std
         rbins_filtered = rbins_filtered[mask]
         ba_filtered = ba_filtered[mask]
         ca_filtered = ca_filtered[mask]
-        # Recreate splines
-        ba_s = UnivariateSpline(rbins_filtered, ba_filtered, k=k, s=s)
-        ca_s = UnivariateSpline(rbins_filtered, ca_filtered, k=k, s=s)
 
+        # Check again after second outlier removal
+        if len(rbins_filtered) < min_points:
+            return rbins_filtered, ba_filtered, ca_filtered, SmoothAxisRatio.nan_func, SmoothAxisRatio.nan_func
+
+        # Recreate splines with bounded domain
+        xb, xe = rbins_filtered[0], rbins_filtered[-1]
+        ba_s_tck = scipy.interpolate.splrep(rbins_filtered, ba_filtered, k=k, s=s, xb=xb, xe=xe)
+        ca_s_tck = scipy.interpolate.splrep(rbins_filtered, ca_filtered, k=k, s=s, xb=xb, xe=xe)
+
+        # Remove large gaps
         diff = np.diff(rbins_filtered, prepend=0)
-
         mask = diff > 1
-
         rbins_filtered = rbins_filtered[~mask]
         ba_filtered = ba_filtered[~mask]
         ca_filtered = ca_filtered[~mask]
-        # Recreate splines
-        ba_s = UnivariateSpline(rbins_filtered, ba_filtered, k=k, s=s)
-        ca_s = UnivariateSpline(rbins_filtered, ca_filtered, k=k, s=s)
 
+        # Final check after gap removal
+        if len(rbins_filtered) < min_points:
+            return rbins_filtered, ba_filtered, ca_filtered, SmoothAxisRatio.nan_func, SmoothAxisRatio.nan_func
 
-        return rbins_filtered, ba_filtered, ca_filtered, ba_s, ca_s
+        # Final spline creation with bounded domain
+        xb, xe = rbins_filtered[0], rbins_filtered[-1]
+        ba_s_tck = scipy.interpolate.splrep(rbins_filtered, ba_filtered, k=k, s=s, xb=xb, xe=xe)
+        ca_s_tck = scipy.interpolate.splrep(rbins_filtered, ca_filtered, k=k, s=s, xb=xb, xe=xe)
+
+        # Create callable functions with bounds checking
+        def ba_s_func(x):
+            x = np.asarray(x)
+            # Clip to bounds to avoid extrapolation issues
+            x_clipped = np.clip(x, xb, xe)
+            return splev(x_clipped, ba_s_tck)
+
+        def ca_s_func(x):
+            x = np.asarray(x)
+            # Clip to bounds to avoid extrapolation issues
+            x_clipped = np.clip(x, xb, xe)
+            return splev(x_clipped, ca_s_tck)
+
+        return rbins_filtered, ba_filtered, ca_filtered, ba_s_func, ca_s_func
 
     def calculate(self, halo, existing_properties):
         rbins_s = existing_properties['rbins_s']
         rbins_d = existing_properties['rbins_d']
-        #print(rbins_s,rbins_d)
-        rbins_s, ba_s, ca_s, ba_s_spline, ca_s_spline = self.smooth_shape(rbins_s, existing_properties['ba_s'],
-                                                                            existing_properties['ca_s'])
-        rbins_d, ba_d, ca_d, ba_d_spline, ca_d_spline = self.smooth_shape(rbins_d, existing_properties['ba_d'],
-                                                                            existing_properties['ca_d'])
+        rbins_g = existing_properties['rbins_g']
 
-        return ba_s_spline, ca_s_spline, ba_d_spline, ca_d_spline
+        # Process stellar component first to get the radial range
+        rbins_s, ba_s, ca_s, ba_s_spline, ca_s_spline = self.smooth_shape(rbins_s, existing_properties['ba_s'],
+                                                                          existing_properties['ca_s'])
+
+        # Get the maximum radial bin from the stellar component
+        if len(rbins_s) > 0:
+            max_rbin_s = np.max(rbins_s) + 1
+        else:
+            # If no stellar data, use a very small value to filter everything
+            max_rbin_s = -1
+
+        # Filter dark matter component to stellar range
+        mask_d = rbins_d <= max_rbin_s
+        rbins_d_filtered = rbins_d[mask_d]
+        ba_d_filtered = existing_properties['ba_d'][mask_d]
+        ca_d_filtered = existing_properties['ca_d'][mask_d]
+
+        # Filter gas component to stellar range
+        mask_g = rbins_g <= max_rbin_s
+        rbins_g_filtered = rbins_g[mask_g]
+        ba_g_filtered = existing_properties['ba_g'][mask_g]
+        ca_g_filtered = existing_properties['ca_g'][mask_g]
+
+        # Process dark matter component with filtered data
+        rbins_d, ba_d, ca_d, ba_d_spline, ca_d_spline = self.smooth_shape(rbins_d_filtered, ba_d_filtered,
+                                                                          ca_d_filtered)
+
+        # Process gas component with filtered data
+        rbins_g, ba_g, ca_g, ba_g_spline, ca_g_spline = self.smooth_shape(rbins_g_filtered, ba_g_filtered,
+                                                                          ca_g_filtered)
+
+        return rbins_s, ba_s_spline, ca_s_spline, rbins_d, ba_d_spline, ca_d_spline, rbins_g, ba_g_spline, ca_g_spline
     
 
 class DynamicalMass(PynbodyPropertyCalculation):
@@ -2108,35 +2677,90 @@ class BaryonicFractionVirial(PynbodyPropertyCalculation):
         return m_vir, m_star, m_gas, mb_mvir
 
 
-class EdgeRadius(PynbodyPropertyCalculation):
+class StarFormationProfile(PynbodyPropertyCalculation):
     """
-    Calculate the edge radius of a halo, defined as the radius where the star formation rate drops below a threshold.
+    Calculate star formation rate profile and edge radius for a halo.
+
+    This class computes two key properties related to star formation in a halo:
+
+    1. R_edge: The radius at which star formation effectively ceases, defined as the
+       smallest radius where the normalized star formation rate (s_sfr) drops to
+       zero or below. This represents the "edge" of active star formation.
+
+    2. s_sfr_profile: The normalized star formation rate profile, calculated as the
+       ratio of newly formed stellar mass to total stellar mass in radial bins.
+       This profile shows how star formation efficiency varies with radius.
+
+    The calculation:
+    - Orients the halo face-on for consistent radial measurements
+    - Identifies newly formed stars within a specified lookback time (default 100 Myr)
+    - Creates radial profiles for both newly formed and total stellar mass
+    - Computes the normalized star formation rate (s_sfr) as their ratio
+    - Determines R_edge as the first radius where star formation ceases
+
+    Attributes:
+        lookback_time (float): Time period in Myr to define "newly formed" stars.
+                              Default is 100 Myr.
+
+    Example:
+        # Use default 100 Myr lookback time
+        calculator = StarFormationProfile()
+
+        # Use custom 50 Myr lookback time
+        calculator = StarFormationProfile(lookback_time=50.0)
+
+        # Use custom 200 Myr lookback time
+        calculator = StarFormationProfile(lookback_time=200.0)
     """
-    names = ['edge_radius']
+    names = ['r_edge','r1', 's_sfr_profile']
+    lookback_time = 100.0  # Default lookback time in Myr
 
+    def calculate(self, particle_data, existing_properties):
+        """
+        Calculate the star formation profile and edge radius.
 
-    def calculate(self, halo, existing_properties):
-        # Ensure halo is in physical units
+        Returns:
+            tuple: (R_edge, s_sfr_profile) where:
+                - R_edge: Radius where star formation ceases (float)
+                - s_sfr_profile: Normalized star formation rate vs radius (array)
+        """
+        halo = particle_data
+
+        # Set physical units and orient face-on for consistent radial measurements
         halo.physical_units()
         pynbody.analysis.angmom.faceon(halo)
-        # find all newly formed star particles in the last 100 Myr
-        newly_formed_stars = halo.s[halo.s['tform'] > (halo.s['tform'].max() - 100 * pynbody.units.Myr)]
-        #create a new property for the star formation rate
-        # halo.s['sfr'] = newly_formed_stars['mass'] / (100 * pynbody.units.Myr)
-        prof_sfr = pynbody.analysis.profile.Profile(halo.s[halo.s['sfr'] > 0], type='lin', min=0.1,
-                                                    max=5 * halo.s['r'].max(), ndim=2,
+        Rhalf = pynbody.analysis.luminosity.half_light_r(halo)
+
+        # Find newly formed stars in the specified lookback time
+        newly_formed_stars = halo.s[halo.s['tform'] > (halo.s['tform'].max() - self.lookback_time * pynbody.units.Myr)]
+
+        # Create profiles
+        prof_sfr = pynbody.analysis.profile.Profile(newly_formed_stars, type='lin', min=Rhalf/3,
+                                                    max=halo.s['r'].max(), ndim=2,
                                                     nbins=int((5 * halo.s['r'].max()) / 0.1))
 
-        prof = pynbody.analysis.profile.Profile(halo.s, type='lin', min=0.1,
-                                                max=5 * halo.s['r'].max(), ndim=2,
+        prof = pynbody.analysis.profile.Profile(halo.s, type='lin', min=Rhalf/3,
+                                                max=halo.s['r'].max(), ndim=2,
                                                 nbins=int((5 * halo.s['r'].max()) / 0.1))
+        bin_area = prof._binsize.in_units('pc^2')
 
-        #get the specific star formation rate by dividing the mass of the new stars by all stars
-
-        s_sfr = prof_sfr['mass'] / prof['mass']
+        density = prof['mass'].in_units('Msol') / bin_area
         
+        R1 = np.min(prof['rbins'][density < 1])
 
-        return edge_radius
+        # Calculate s_sfr (star formation rate profile)
+        s_sfr = prof_sfr['mass'] / prof['mass']
+
+        # Calculate r_edge as the smallest radius where s_sfr <= 0
+        # Handle case where no bins meet the criteria
+        valid_bins = s_sfr <= 0
+        if np.any(valid_bins):
+            r_edge = np.min(prof_sfr['rbins'][valid_bins])
+        else:
+            r_edge = np.nan  # or some default value
+
+        # Return values in the same order as names
+        return r_edge,R1, s_sfr
 
 
 

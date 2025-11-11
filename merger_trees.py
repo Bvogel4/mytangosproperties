@@ -30,7 +30,7 @@ class HaloNode:
         # Extract key physical properties from the halo
         self.ndm = halo.NDM  # Number of dark matter particles
         self.mvir = halo['Mvir']  # Virial mass (total mass within virial radius)
-        self.mstar = halo['Mstar']  # Stellar mass
+        #self.mstar = halo['Mstar']  # Stellar mass
 
         # Merger-related properties (set later during tree construction)
         self.merger_time = None  # Time when merger occurred (in Gyr)
@@ -197,7 +197,7 @@ def print_merger_tree(tree):
         print()  # Blank line between depth levels
 
 
-def visualize_tree(tree):
+def visualize_tree(tree,main_line):
     """
     Create a visual representation of the merger tree using NetworkX and Matplotlib.
 
@@ -211,6 +211,7 @@ def visualize_tree(tree):
     # Create a directed graph where edges point from progenitors to descendants
     G = nx.DiGraph()
     time_to_nodes = defaultdict(list)
+    colormap = []  # For coloring nodes by merger status
 
     # Add nodes and edges to the graph
     for depth, nodes in tree.items():
@@ -218,13 +219,24 @@ def visualize_tree(tree):
             # Round time for cleaner display
             time = round(node.halo.timestep.time_gyr, 2)
 
+            color = 'pink'
+            if node.is_merger:
+                color = 'blue'
+            #check if part of the main evolutionary line
+            if node in main_line:
+                color = 'red'
+            if node in main_line and node.is_merger:
+                color = 'purple'
+
             # Add node with properties for visualization
+            colormap.append(color)
             G.add_node(node.halo.id, time=time, mvir=node.mvir)
             time_to_nodes[time].append(node.halo.id)
 
             # Add edges from progenitors to this halo
             for prog in node.progenitors:
                 G.add_edge(prog.halo.id, node.halo.id)
+
 
     # Calculate positions for nodes - organize by time (vertical) and spread horizontally
     pos = {}
@@ -240,7 +252,7 @@ def visualize_tree(tree):
             pos[node] = (x, y)
 
     # Create the plot
-    plt.figure(figsize=(5, 12))
+    plt.figure(figsize=(12, 12))
 
     # Draw connections between halos (evolutionary relationships)
     nx.draw_networkx_edges(G, pos, arrows=True, edge_color='gray', arrowsize=20)
@@ -248,11 +260,11 @@ def visualize_tree(tree):
     # Draw halos as circles, sized by mass
     max_mass = max(nx.get_node_attributes(G, 'mvir').values())
     node_sizes = [300 * (G.nodes[node]['mvir'] / max_mass) ** 0.5 for node in G.nodes()]
-    nx.draw_networkx_nodes(G, pos, node_color='lightblue', node_size=node_sizes)
+    nx.draw_networkx_nodes(G, pos, node_color=colormap, node_size=node_sizes)
 
     # Add labels showing halo ID and time
-    labels = {node: f"{node}\n{G.nodes[node]['time']:.2f} Gyr" for node in G.nodes}
-    nx.draw_networkx_labels(G, pos, labels, font_size=8)
+    #labels = {node: f"{node}\n{G.nodes[node]['time']:.2f} Gyr" for node in G.nodes}
+    #nx.draw_networkx_labels(G, pos, labels, font_size=8)
 
     # Add time scale on y-axis
     y_positions = [(1 - (i / (len(times) - 1))) for i in range(len(times))]
